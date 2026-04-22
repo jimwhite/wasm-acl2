@@ -38,7 +38,7 @@ loaded by `(include-book "kestrel/wasm/portcullis" :dir :system)` in each
 `cert.acl2`.
 
 ```bash
-# From examples/wasm1-acl2-formalization-plan/ :
+# From the repo root:
 make                       # certify all 45 books (top + 27 proofs + 15 tests + library)
 make top                   # just execution + validation + top
 make proofs                # just proofs/*.lisp
@@ -656,7 +656,7 @@ echo '(ld "test-e2e-add.lisp") (quit)' | $ACL2 2>&1 | grep "=== ALL"
 ## 12. File Organization (actual)
 
 ```
-examples/wasm1-acl2-formalization-plan/
+wasm-acl2/   # repo root
 ├── cert.acl2                # (include-book "kestrel/wasm/portcullis" :dir :system)
 ├── Makefile                 # drives cert.pl over every book
 ├── top.lisp                 # library bundle (execution + validation)

@@ -86,7 +86,7 @@ fi
 export ACL2=$HOME/acl2/saved_acl2
 export CERT=$HOME/acl2/books/build/cert.pl
 # Certify the WASM tree
-cd examples/wasm1-acl2-formalization-plan && make
+cd wasm-acl2 && make
 # Verify
 echo '(+ 40 2) (quit)' | $ACL2
 ```
@@ -543,7 +543,7 @@ cat proofs/proof-add-spec.cert.out
 
 ### File Organization (current)
 ```
-examples/wasm1-acl2-formalization-plan/
+wasm-acl2/   # repo root
 ├── cert.acl2               # Portcullis for every book in this dir: (include-book "kestrel/wasm/portcullis" :dir :system)
 ├── Makefile                # `make` drives cert.pl over every book
 ├── top.lisp                # Library bundle: include-book execution + validation

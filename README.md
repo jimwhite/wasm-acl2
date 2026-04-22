@@ -94,10 +94,9 @@ ACL2_HOME=/home/acl2                     # ACL2 sources
 ACL2_SYSTEM_BOOKS=/home/acl2/books       # community books (incl. kestrel/wasm)
 ```
 
-The `Makefile` defaults match those paths, so from this directory you can just:
+The `Makefile` defaults match those paths, so from the repo root you can just:
 
 ```bash
-cd examples/wasm1-acl2-formalization-plan
 make                         # certify all 45 books (library + 27 proofs + 15 tests)
 make top                     # just execution + validation + top
 make proofs                  # just proofs/proof-*.lisp
@@ -117,7 +116,7 @@ git clone --depth 1 https://github.com/acl2/acl2.git $HOME/acl2
 cd $HOME/acl2 && make LISP=sbcl
 export ACL2=$HOME/acl2/saved_acl2
 export CERT=$HOME/acl2/books/build/cert.pl
-cd examples/wasm1-acl2-formalization-plan && make
+cd wasm-acl2 && make
 ```
 
 Downstream users can simply:
