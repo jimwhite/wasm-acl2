@@ -21,6 +21,7 @@
 (in-package "WASM")
 (include-book "../execution")
 (include-book "arithmetic/mod-gcd" :dir :system)
+(include-book "kestrel/bv/bvmod" :dir :system)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; The program under test — kept in sync with tests/test-spot-check.lisp.
@@ -115,3 +116,109 @@
                     (:free (v s) (push-vals v s))))))
 
 (value-triple (cw "~% - gcd-impl-base-case: gcd(a,0) = a at the WASM level (Q.E.D.)~%"))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Phase 2: Step-case lemma.
+;;
+;; After 2 steps from `make-gcd-state a b`, we arrive at a "loop-entry"
+;; state: locals=(a b 0), instrs = loop-body, label-stack = (loop, block).
+;; After one full iteration (13 more WASM steps) we are back at a
+;; loop-entry state with locals = (b, a mod b, b).
+;;
+;; We express the loop-entry state with an extra parameter t (the temp
+;; local's value), because on the second and later iterations it is no
+;; longer 0.
+
+(defconst *gcd-loop-body*
+  '((:local.get 1)
+    (:i32.eqz)
+    (:br_if 1)
+    (:local.get 1)
+    (:local.set 2)
+    (:local.get 0)
+    (:local.get 1)
+    (:i32.rem_u)
+    (:local.set 1)
+    (:local.get 2)
+    (:local.set 0)
+    (:br 0)))
+
+(defconst *gcd-block-label*
+  (make-label-entry :arity 0
+                    :continuation '((:local.get 0))
+                    :is-loop nil))
+
+(defconst *gcd-loop-label*
+  (make-label-entry :arity 0
+                    :continuation (list (list :loop 0 *gcd-loop-body*))
+                    :is-loop t))
+
+(defun make-loop-entry-state (a b tmp)
+  (declare (xargs :guard (and (unsigned-byte-p 32 a)
+                              (unsigned-byte-p 32 b)
+                              (unsigned-byte-p 32 tmp))
+                  :verify-guards nil))
+  (make-state
+   :store nil
+   :call-stack (list (make-frame
+                      :return-arity 1
+                      :locals (list (make-i32-val a)
+                                    (make-i32-val b)
+                                    (make-i32-val tmp))
+                      :operand-stack (empty-operand-stack)
+                      :instrs *gcd-loop-body*
+                      :label-stack (list *gcd-loop-label* *gcd-block-label*)))
+   :memory nil :globals nil))
+
+;; Sanity: running 2 steps from a fresh gcd-state gives the corresponding
+;; loop-entry-state.
+(defthm gcd-state-to-loop-entry
+  (implies (and (unsigned-byte-p 32 a)
+                (unsigned-byte-p 32 b))
+           (equal (run 2 (make-gcd-state a b))
+                  (make-loop-entry-state a b 0)))
+  :hints (("Goal"
+           :in-theory (union-theories (current-theory :here) *gcd-exec-theory*)
+           :do-not '(generalize)
+           :expand ((:free (n s) (run n s))))))
+
+(value-triple (cw " - gcd-state-to-loop-entry: 2 steps reach loop entry (Q.E.D.)~%"))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Step case: from a loop-entry state with b ≠ 0, 13 steps reach
+;; loop-entry(b, (mod a b), b).
+
+(local (include-book "arithmetic-5/top" :dir :system))
+
+(local (defthm u32p-of-mod
+  (implies (and (unsigned-byte-p 32 a)
+                (unsigned-byte-p 32 b))
+           (unsigned-byte-p 32 (mod a b)))
+  :hints (("Goal" :cases ((equal b 0))))))
+
+(local (defthm bvmod-32-when-u32
+  ;; i32.rem_u on u32 inputs with nonzero divisor is plain integer mod.
+  (implies (and (unsigned-byte-p 32 a)
+                (unsigned-byte-p 32 b)
+                (not (equal b 0)))
+           (equal (acl2::bvmod 32 a b) (mod a b)))
+  :hints (("Goal" :in-theory (enable acl2::bvmod)))))
+
+(defthm loop-entry-step-case
+  (implies (and (unsigned-byte-p 32 a)
+                (unsigned-byte-p 32 b)
+                (unsigned-byte-p 32 tmp)
+                (not (equal b 0)))
+           (equal (run 13 (make-loop-entry-state a b tmp))
+                  (make-loop-entry-state b (mod a b) b)))
+  :hints (("Goal"
+           :in-theory (union-theories (current-theory :here) *gcd-exec-theory*)
+           :do-not '(generalize)
+           :expand ((:free (n s) (run n s))
+                    (:free (n s a) (top-n-operands n s a))
+                    (:free (n s) (pop-n-labels n s))
+                    (:free (v s) (push-vals v s))))))
+
+(value-triple (cw " - loop-entry-step-case: one iteration reduces (a,b) to (b,a mod b) (Q.E.D.)~%"))
+
+
