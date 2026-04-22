@@ -1,4 +1,0 @@
-(in-package "ACL2")
-(include-book "kestrel/wasm/portcullis" :dir :system)
-; cert-flags: ? t :skip-proofs-okp t
-(certify-book "proof-gcd-spec" ? t :skip-proofs-okp t)
