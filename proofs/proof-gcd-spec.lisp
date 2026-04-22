@@ -335,6 +335,42 @@
   :hints (("Goal" :in-theory (enable acl2::nonneg-int-mod mod floor)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Combined run/step rewrite: one loop iteration, distributed into
+;; additional fuel.  This avoids forcing rounds over statep during the
+;; main induction.
+
+(defthm run-plus-at-loop-entry
+  (implies (and (unsigned-byte-p 32 a)
+                (unsigned-byte-p 32 b)
+                (unsigned-byte-p 32 tmp)
+                (not (equal b 0))
+                (natp n))
+           (equal (run (+ 13 n) (make-loop-entry-state a b tmp))
+                  (run n (make-loop-entry-state b (mod a b) b))))
+  :hints (("Goal"
+           :do-not '(generalize fertilize eliminate-destructors)
+           :do-not-induct t
+           :use ((:instance loop-entry-step-case (a a) (b b) (tmp tmp))
+                 (:instance run-split-when-statep
+                            (m 13) (n n)
+                            (state (make-loop-entry-state a b tmp)))
+                 (:instance statep-of-make-loop-entry-state
+                            (a a) (b b) (tmp tmp))
+                 (:instance statep-of-make-loop-entry-state
+                            (a b) (b (mod a b)) (tmp b))
+                 (:instance u32p-of-mod (a a) (b b)))
+           :in-theory (e/d (u32p)
+                           (loop-entry-step-case
+                            run-split-when-statep
+                            statep-of-make-loop-entry-state
+                            u32p-of-mod
+                            (:definition run)
+                            (:definition make-loop-entry-state)
+                            (:definition make-i32-val))))))
+
+(value-triple (cw " - run-plus-at-loop-entry: splits (+ 13 n) run through one iter (Q.E.D.)~%"))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Main correctness theorem (loop-entry form).
 
 (defthm gcd-loop-entry-correct
@@ -348,20 +384,14 @@
                   (make-i32-val (acl2::nonneg-int-gcd a b))))
   :hints (("Goal"
            :induct (gcd-loop-ind a b tmp)
-           :in-theory (e/d (call-stackp framep label-stackp label-entryp
-                            operand-stackp val-listp i32-valp u32p
-                            statep)
-                           (loop-entry-step-case
-                            loop-entry-base-case
-                            acl2::nonneg-int-gcd
-                            (:induction gcd-loop-fuel)))
+           :in-theory (disable loop-entry-step-case
+                               loop-entry-base-case
+                               run-split-when-statep
+                               statep-of-make-loop-entry-state
+                               acl2::nonneg-int-gcd
+                               make-loop-entry-state
+                               (:induction gcd-loop-fuel))
            :expand ((:free (x) (acl2::nonneg-int-gcd a x))))
-          ("Subgoal *1/2"
-           :use ((:instance loop-entry-step-case (a a) (b b) (tmp tmp))
-                 (:instance run-split-when-statep
-                            (m 13)
-                            (n (gcd-loop-fuel b (mod a b)))
-                            (state (make-loop-entry-state a b tmp)))))
           ("Subgoal *1/1"
            :use ((:instance loop-entry-base-case (a a) (tmp tmp))))))
 
