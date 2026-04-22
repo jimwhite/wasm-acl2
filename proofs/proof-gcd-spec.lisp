@@ -1,4 +1,4 @@
-;; WASM 1.0 ACL2 — GCD end-to-end correctness specification
+;; WASM 1.0 ACL2 — GCD end-to-end correctness specification (in progress)
 ;;
 ;; The WASM program `*gcd-func*` (from tests/test-spot-check.lisp) implements
 ;; the Euclidean algorithm on unsigned 32-bit integers:
@@ -7,108 +7,111 @@
 ;;     return a;
 ;;
 ;; The ACL2 arithmetic book `arithmetic/mod-gcd` already defines the
-;; mathematical spec `nonneg-int-gcd` and proves it is the greatest common
-;; divisor (largest common divisor, is-common-divisor, etc.).
+;; mathematical spec `nonneg-int-gcd` and proves it is a GCD.
 ;;
-;; The top-level correctness theorem we want is:
+;; Strategy: build up from concrete symbolic-execution lemmas (in the
+;; style of proofs/proof-loop-spec.lisp) toward the general theorem.
 ;;
-;;     For all u32 a, b, running the WASM gcd implementation on (a, b)
-;;     produces the i32 value (nonneg-int-gcd a b).
-;;
-;; Since `run` takes a fuel argument, we need a step bound large enough
-;; to cover the worst case. Euclidean GCD on u32 inputs terminates in
-;; O(log phi (min(a,b))) iterations; a safe per-u32-input upper bound is
-;; roughly 100 iterations (Fibonacci worst case < 47). Each loop iteration
-;; executes ~13 WASM steps plus fixed enter/exit overhead, so 2000 fuel is
-;; more than enough for any u32 pair.
+;;   Phase 1 (this file)  — Base case lemma: when b = 0, the WASM
+;;                          implementation returns (make-i32-val a).
+;;   Phase 2 (future)     — Step-case lemma: one full loop iteration
+;;                          reduces (a,b) to (b, a rem_u b).
+;;   Phase 3 (future)     — Induction on nonneg-int-gcd to combine.
 
 (in-package "WASM")
 (include-book "../execution")
 (include-book "arithmetic/mod-gcd" :dir :system)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; The program under test — kept in sync with tests/test-spot-check.lisp
+;; The program under test — kept in sync with tests/test-spot-check.lisp.
 
-(defconst *gcd-func*
-  (make-funcinst
-   :param-count 2 :local-count 1 :return-arity 1
-   :body (list
-          '(:block 0 ((:loop 0 ((:local.get 1)
-                                (:i32.eqz)
-                                (:br_if 1)
-                                (:local.get 1)
-                                (:local.set 2)
-                                (:local.get 0)
-                                (:local.get 1)
-                                (:i32.rem_u)
-                                (:local.set 1)
-                                (:local.get 2)
-                                (:local.set 0)
-                                (:br 0)))))
-          '(:local.get 0))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Program under test — body mirrors tests/test-spot-check.lisp but we
+;; execute it directly in a single frame (no `:call` wrapper), as in
+;; proof-abs-e2e.lisp. This keeps the result a plain state (no :done tag).
+
+(defconst *gcd-body*
+  '((:block 0 ((:loop 0 ((:local.get 1)
+                         (:i32.eqz)
+                         (:br_if 1)
+                         (:local.get 1)
+                         (:local.set 2)
+                         (:local.get 0)
+                         (:local.get 1)
+                         (:i32.rem_u)
+                         (:local.set 1)
+                         (:local.get 2)
+                         (:local.set 0)
+                         (:br 0)))))
+    (:local.get 0)))
 
 (defun make-gcd-state (a b)
   (declare (xargs :guard (and (unsigned-byte-p 32 a)
                               (unsigned-byte-p 32 b))
                   :verify-guards nil))
   (make-state
-   :store (list *gcd-func*)
-   :call-stack (list (make-frame :return-arity 1 :locals nil
-                      :operand-stack (list (make-i32-val b) (make-i32-val a))
-                      :instrs (list '(:call 0)) :label-stack nil))
+   :store nil
+   :call-stack (list (make-frame
+                      :return-arity 1
+                      :locals (list (make-i32-val a)
+                                    (make-i32-val b)
+                                    (make-i32-val 0))
+                      :operand-stack (empty-operand-stack)
+                      :instrs *gcd-body*
+                      :label-stack nil))
    :memory nil :globals nil))
 
-;; Extract final i32 result from a :done payload or terminal state.
-(defun get-result (r)
-  (declare (xargs :guard t :verify-guards nil))
-  (if (and (consp r) (eq :done (first r)))
-      (let* ((st (second r))
-             (cs (state->call-stack st))
-             (f (car cs)))
-        (top-operand (frame->operand-stack f)))
-    (if (statep r)
-        (top-operand (current-operand-stack r))
-      r)))
+(defun gcd-result (st)
+  (declare (xargs :guard (statep st) :verify-guards nil))
+  (top-operand (current-operand-stack st)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Fuel bound.
-;;
-;; For u32 inputs, Euclidean GCD iterates at most ~47 times (Fibonacci
-;; bound on pairs below 2^32). Each iteration is 13 body steps; loop
-;; enter/exit overhead is a small constant. 2000 is a conservative cap.
-;;
-;; We express this as a defun so it's easy to refine (e.g. to an exact
-;; bound) during the proof.
+;; Theory for symbolic execution (mirrors proof-loop-spec.lisp /
+;; proof-abs-e2e.lisp).
 
-(defun gcd-fuel (a b)
-  (declare (xargs :guard (and (unsigned-byte-p 32 a)
-                              (unsigned-byte-p 32 b))
-                  :verify-guards nil)
-           (ignore a b))
-  2000)
+(local (defconst *gcd-exec-theory*
+  '(run execute-instr
+    execute-block execute-loop
+    execute-local.get execute-local.set
+    execute-i32.eqz execute-i32.rem_u
+    execute-br execute-br_if
+    current-frame current-instrs current-operand-stack
+    current-label-stack current-locals
+    update-current-operand-stack update-current-instrs
+    update-current-label-stack update-current-locals
+    complete-label return-from-function
+    make-i32-val i32-valp i32-const-argsp
+    local-idx-argsp no-argsp
+    push-operand top-operand pop-operand top-n-operands push-vals
+    operand-stack-height empty-operand-stack operand-stackp
+    localsp framep top-frame push-call-stack pop-call-stack call-stackp
+    valp i64-valp u32p u64p val-listp
+    label-entryp label-entry->arity label-entry->continuation
+    label-entry->is-loop push-label pop-label top-label
+    label-stackp nth-label pop-n-labels
+    nth-local update-nth-local
+    frame->return-arity frame->locals frame->operand-stack
+    frame->instrs frame->label-stack
+    state->store state->call-stack state->memory state->globals state->table
+    state
+    frame
+    statep)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Top-level correctness theorem (statement only for now).
-;;
-;; For every pair of unsigned 32-bit integers a, b, executing the WASM
-;; gcd implementation yields (make-i32-val (nonneg-int-gcd a b)).
-;;
-;; Proof strategy (future work):
-;;   1. Define a "gcd-loop-invariant" relating the WASM state after k
-;;      loop iterations to (nonneg-int-gcd a0 b0).
-;;   2. Prove a stepwise lemma: one loop iteration transforms
-;;      locals = (a, b, _) into (b, a mod b, b), preserving
-;;      (nonneg-int-gcd local0 local1) = (nonneg-int-gcd a0 b0).
-;;   3. Prove termination: (a, b) strictly decreases in the well-founded
-;;      measure `b` (as natp), so after finitely many iterations b = 0
-;;      and the loop exits with local0 = (nonneg-int-gcd a0 b0).
-;;   4. Bound the iteration count by gcd-fuel and discharge the outer run.
+;; Phase 1: Base case. When b = 0, running the WASM gcd returns a.
 
-(skip-proofs
- (defthm gcd-impl-correct
-   (implies (and (unsigned-byte-p 32 a)
-                 (unsigned-byte-p 32 b))
-            (equal (get-result (run (gcd-fuel a b) (make-gcd-state a b)))
-                   (make-i32-val (acl2::nonneg-int-gcd a b))))))
+(defthm gcd-impl-base-case
+  (implies (unsigned-byte-p 32 a)
+           (equal (top-operand
+                   (current-operand-stack
+                    (run 6 (make-gcd-state a 0))))
+                  (make-i32-val a)))
+  :hints (("Goal"
+           :in-theory (union-theories (current-theory :here) *gcd-exec-theory*)
+           :do-not '(generalize)
+           :expand ((:free (n s) (run n s))
+                    (:free (n s a) (top-n-operands n s a))
+                    (:free (n s) (pop-n-labels n s))
+                    (:free (v s) (push-vals v s))))))
 
-(value-triple (cw "~% - gcd-impl-correct: WASM gcd = nonneg-int-gcd (STATEMENT, proof pending)~%"))
+(value-triple (cw "~% - gcd-impl-base-case: gcd(a,0) = a at the WASM level (Q.E.D.)~%"))
