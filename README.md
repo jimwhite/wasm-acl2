@@ -1,6 +1,8 @@
 # WASM 1.0 ACL2 Formalization
 
-A complete, machine-checked formalization of the WASM 1.0 operational semantics in ACL2, extending the [Kestrel Institute's WASM books](https://github.com/acl2/acl2/tree/master/books/kestrel/wasm).
+A machine-checked formalization of the WASM 1.0 operational semantics in ACL2, extending the [Kestrel Institute's WASM books](https://github.com/acl2/acl2/tree/master/books/kestrel/wasm).
+
+**AI-use disclosure**: This is agent-generated code, using OpenHands and Claude Opus 4.6. It has not yet been evaluated by qualified researchers.
 
 ## Status: 170/170 Instructions — Complete ✅
 
