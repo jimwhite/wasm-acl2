@@ -221,4 +221,181 @@
 
 (value-triple (cw " - loop-entry-step-case: one iteration reduces (a,b) to (b,a mod b) (Q.E.D.)~%"))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Base case from loop entry: when b = 0, 4 steps from a loop-entry state
+;; leave `a` as the top operand.
+
+(defthm loop-entry-base-case
+  (implies (and (unsigned-byte-p 32 a)
+                (unsigned-byte-p 32 tmp))
+           (equal (top-operand
+                   (current-operand-stack
+                    (run 4 (make-loop-entry-state a 0 tmp))))
+                  (make-i32-val a)))
+  :hints (("Goal"
+           :in-theory (union-theories (current-theory :here) *gcd-exec-theory*)
+           :do-not '(generalize)
+           :expand ((:free (n s) (run n s))
+                    (:free (n s a) (top-n-operands n s a))
+                    (:free (n s) (pop-n-labels n s))
+                    (:free (v s) (push-vals v s))))))
+
+(value-triple (cw " - loop-entry-base-case: b=0 exits with a on top (Q.E.D.)~%"))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Phase 3: Induction.
+;;
+;; Fuel function mirroring the Euclidean recursion: 4 steps for b=0,
+;; 13 steps per iteration otherwise.
+
+(defun gcd-loop-fuel (a b)
+  (declare (xargs :measure (nfix b)
+                  :verify-guards nil))
+  (if (zp b)
+      4
+    (+ 13 (gcd-loop-fuel b (mod a b)))))
+
+;; Induction scheme mirroring the step lemma: the recursive call's
+;; `tmp` argument becomes `b` (matching loop-entry-step-case's output).
+(defun gcd-loop-ind (a b tmp)
+  (declare (xargs :measure (nfix b)
+                  :verify-guards nil))
+  (if (zp b)
+      (list a b tmp)
+    (gcd-loop-ind b (mod a b) b)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Run-split lemma: when `run M state` lands in a proper state (no trap,
+;; no :done), then `run (+ M N) state = run N (run M state)`.
+;;
+;; This is needed to glue together symbolic-execution lemmas across an
+;; inductive proof: we can take 13 steps to reach the next loop entry,
+;; then apply the induction hypothesis on the remaining N steps.
+
+(local (defun run-ind (m state)
+  (declare (xargs :measure (nfix m)))
+  (if (zp m)
+      state
+    (if (not (consp (current-instrs state)))
+        (if (consp (current-label-stack state))
+            (let ((ns (complete-label state)))
+              (if (eq :trap ns) state (run-ind (+ -1 m) ns)))
+          (let ((r (return-from-function state)))
+            (cond ((eq :trap r) state)
+                  ((and (consp r) (eq :done (first r))) state)
+                  (t (run-ind (+ -1 m) r)))))
+      (let ((ns (step state)))
+        (if (eq :trap ns) state (run-ind (+ -1 m) ns)))))))
+
+(local (defthm not-statep-of-done
+  (not (statep (cons :done x)))
+  :hints (("Goal" :in-theory (enable statep)))))
+
+(local (defthm not-statep-of-trap
+  (not (statep :trap))
+  :hints (("Goal" :in-theory (enable statep)))))
+
+(local (defthm run-split-when-statep
+  (implies (and (natp m) (natp n) (statep (run m state)))
+           (equal (run (+ m n) state)
+                  (run n (run m state))))
+  :hints (("Goal" :induct (run-ind m state)))))
+
+(value-triple (cw " - run-split-when-statep: local run-decomposition lemma (Q.E.D.)~%"))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; statep-ness of a loop-entry state (needed to discharge the hyp of
+;; run-split-when-statep after taking 13 steps).
+
+(local (defthm statep-of-make-loop-entry-state
+  (implies (and (unsigned-byte-p 32 a)
+                (unsigned-byte-p 32 b)
+                (unsigned-byte-p 32 tmp))
+           (statep (make-loop-entry-state a b tmp)))
+  :hints (("Goal" :in-theory (enable statep call-stackp framep
+                                     label-stackp label-entryp
+                                     operand-stackp val-listp
+                                     i32-valp u32p)))))
+
+(local (defthm nonneg-int-gcd-of-0-right
+  (equal (acl2::nonneg-int-gcd x 0) (nfix x))
+  :hints (("Goal" :expand ((acl2::nonneg-int-gcd x 0))))))
+
+(local (defthm nonneg-int-gcd-of-0-left
+  (equal (acl2::nonneg-int-gcd 0 x) (nfix x))
+  :hints (("Goal" :expand ((acl2::nonneg-int-gcd 0 x))
+                  :in-theory (enable acl2::nonneg-int-mod)))))
+
+(local (defthm nfix-when-natp
+  (implies (natp x) (equal (nfix x) x))))
+
+(local (defthm nonneg-int-mod-is-mod
+  (implies (and (natp a) (posp b))
+           (equal (acl2::nonneg-int-mod a b) (mod a b)))
+  :hints (("Goal" :in-theory (enable acl2::nonneg-int-mod mod floor)))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Main correctness theorem (loop-entry form).
+
+(defthm gcd-loop-entry-correct
+  (implies (and (unsigned-byte-p 32 a)
+                (unsigned-byte-p 32 b)
+                (unsigned-byte-p 32 tmp))
+           (equal (top-operand
+                   (current-operand-stack
+                    (run (gcd-loop-fuel a b)
+                         (make-loop-entry-state a b tmp))))
+                  (make-i32-val (acl2::nonneg-int-gcd a b))))
+  :hints (("Goal"
+           :induct (gcd-loop-ind a b tmp)
+           :in-theory (e/d (call-stackp framep label-stackp label-entryp
+                            operand-stackp val-listp i32-valp u32p
+                            statep)
+                           (loop-entry-step-case
+                            loop-entry-base-case
+                            acl2::nonneg-int-gcd
+                            (:induction gcd-loop-fuel)))
+           :expand ((:free (x) (acl2::nonneg-int-gcd a x))))
+          ("Subgoal *1/2"
+           :use ((:instance loop-entry-step-case (a a) (b b) (tmp tmp))
+                 (:instance run-split-when-statep
+                            (m 13)
+                            (n (gcd-loop-fuel b (mod a b)))
+                            (state (make-loop-entry-state a b tmp)))))
+          ("Subgoal *1/1"
+           :use ((:instance loop-entry-base-case (a a) (tmp tmp))))))
+
+(value-triple (cw " - gcd-loop-entry-correct: top-operand = nonneg-int-gcd for all u32 (a,b) (Q.E.D.)~%"))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Final theorem: starting from the fresh gcd-state, the WASM
+;; implementation computes nonneg-int-gcd.
+
+(defun gcd-total-fuel (a b)
+  (declare (xargs :verify-guards nil))
+  (+ 2 (gcd-loop-fuel a b)))
+
+(defthm gcd-impl-correct
+  (implies (and (unsigned-byte-p 32 a)
+                (unsigned-byte-p 32 b))
+           (equal (top-operand
+                   (current-operand-stack
+                    (run (gcd-total-fuel a b) (make-gcd-state a b))))
+                  (make-i32-val (acl2::nonneg-int-gcd a b))))
+  :hints (("Goal"
+           :in-theory (disable gcd-state-to-loop-entry
+                               gcd-loop-entry-correct)
+           :use ((:instance gcd-state-to-loop-entry (a a) (b b))
+                 (:instance run-split-when-statep
+                            (m 2)
+                            (n (gcd-loop-fuel a b))
+                            (state (make-gcd-state a b)))
+                 (:instance gcd-loop-entry-correct
+                            (a a) (b b) (tmp 0))))))
+
+(value-triple (cw "~%====================================================~%"))
+(value-triple (cw " GCD IMPLEMENTATION PROVED CORRECT for all u32 a,b.~%"))
+(value-triple (cw "====================================================~%"))
+
+
 
