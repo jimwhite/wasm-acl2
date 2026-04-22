@@ -405,6 +405,15 @@
   (declare (xargs :verify-guards nil))
   (+ 2 (gcd-loop-fuel a b)))
 
+(local (defthm statep-of-make-gcd-state
+  (implies (and (unsigned-byte-p 32 a)
+                (unsigned-byte-p 32 b))
+           (statep (make-gcd-state a b)))
+  :hints (("Goal" :in-theory (enable statep call-stackp framep
+                                     label-stackp label-entryp
+                                     operand-stackp val-listp
+                                     i32-valp u32p)))))
+
 (defthm gcd-impl-correct
   (implies (and (unsigned-byte-p 32 a)
                 (unsigned-byte-p 32 b))
@@ -413,9 +422,17 @@
                     (run (gcd-total-fuel a b) (make-gcd-state a b))))
                   (make-i32-val (acl2::nonneg-int-gcd a b))))
   :hints (("Goal"
+           :do-not-induct t
+           :do-not '(generalize fertilize)
            :in-theory (disable gcd-state-to-loop-entry
-                               gcd-loop-entry-correct)
+                               gcd-loop-entry-correct
+                               run-split-when-statep
+                               statep-of-make-gcd-state
+                               make-loop-entry-state
+                               make-gcd-state
+                               acl2::nonneg-int-gcd)
            :use ((:instance gcd-state-to-loop-entry (a a) (b b))
+                 (:instance statep-of-make-gcd-state (a a) (b b))
                  (:instance run-split-when-statep
                             (m 2)
                             (n (gcd-loop-fuel a b))
