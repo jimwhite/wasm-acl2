@@ -1,13 +1,26 @@
 {
-    "name": "Awesome Verified Coding Agents",
+    "name": "WASAM ACL2",
     "image": "ghcr.io/jimwhite/acl2-jupyter:latest",
+    "remoteUser": "jovyan",
+    "workspaceFolder": "/home/jovyan/work",
+    // Start JupyterLab with `jupyter lab` to include auth or `jupyter lab --IdentityProvider.token=''` to skip that.
+    "forwardPorts": [
+        8888
+    ],
+    "portsAttributes": {
+        "8888": {
+            "label": "JupyterLab",
+            "protocol": "http",
+            "onAutoForward": "openBrowserOnce",
+            "requireLocalPort": false
+        }
+    },
     "containerEnv": {
-        "JUPYTER_PORT": "8899",
+        "JUPYTER_PORT": "8888",
         "RESTARTABLE": "yes",
         "USER": "jovyan",
+
         "ACL2_LISP": "sbcl",
-        // Only use one ACL2 / SAVED_ACL2 per container.  
-        // Updated the symlinks /opt/acl2/bin/acl2 and /home/acl2/saved_acl2 to point to the same ACL2 executable.
         "ACL2": "/opt/acl2/bin/acl2",
         "ACL2_HOME": "/home/acl2",
         "ACL2_SYSTEM_BOOKS": "/home/acl2/books"
