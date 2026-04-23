@@ -575,4 +575,174 @@ The pattern generalizes trivially: for any function `foo` with
 `foo-func-correct` at fuel `foo-func-total-fuel`, the companion
 `defun-sk foo-halts-with` + `foo-func-halts` is ~15 boilerplate lines.
 
+## Appendix A — Refactor: factor Tier-C into a reusable encapsulate
+
+As of the `gcd-v3` branch (commits `0f9fb8b`, `5158331`), the roughly
+550 lines of hand-rolled state-gluing that used to live between
+`gcd-impl-correct-state` and `gcd-func-correct` have been replaced by a
+single functional instantiation of a generic theorem exported by
+[proofs/wasm-call-wrap.lisp](wasm-call-wrap.lisp).
+
+### A.1 What `wasm-call-wrap` provides
+
+An `encapsulate` parameterized over six abstract signatures:
+
+| Signature | Role |
+|---|---|
+| `(the-func)` | The `funcinst` being called |
+| `(input-ok a b)` | Guard on the two argument values |
+| `(spec-val a b)` | The `i32-val` the callee leaves on top |
+| `(make-call-frame a b)` | Caller frame with args pushed + `(:call 0)` |
+| `(make-body-state a b)` | State after the entry step (callee frame on top) |
+| `(body-fuel a b)` | Steps required to run the body to `instrs=nil`, `labels=nil` |
+
+Seven constraint theorems the client must discharge (shapes only,
+abbreviated): `funcinstp` of the func; `input-ok` implies two `u32p`s
+(forward-chaining); `i32-valp` of the spec value; `natp` of the fuel;
+`(run 1 <call-state>) = <body-state>`; `statep` of the body-state;
+and a 13-conjunct "body-shape-after-fuel" lemma covering every
+projection the return path reads.
+
+Given those, the book exports a single theorem, [`call-to-done`](wasm-call-wrap.lisp):
+
+```lisp
+(defthm call-to-done
+  (implies (and (input-ok a b) (framep (make-call-frame a b)))
+           (equal (run (+ 3 (body-fuel a b))
+                       (make-state :store (list (the-func))
+                                   :call-stack (list (make-call-frame a b))
+                                   :memory nil :globals nil))
+                  `(:done ,(make-state
+                            :store (list (the-func))
+                            :call-stack (list (make-frame
+                                               :return-arity 1
+                                               :locals nil
+                                               :operand-stack (list (spec-val a b))
+                                               :instrs nil
+                                               :label-stack nil))
+                            :memory nil :globals nil)))))
+```
+
+The statement uses literal `make-state` / `make-frame` forms (not
+witness defuns) so that every symbol it mentions is either a macro or
+a constrained abstract name — which is the condition that makes
+`:functional-instance` substitute cleanly.
+
+### A.2 What §4 of `proof-gcd-spec.lisp` now looks like
+
+1. **Six concrete witness defuns** — `gcd-the-func`, `gcd-input-ok`,
+   `gcd-spec-val`, `gcd-body-state`, `gcd-body-fuel-fn` (plus reusing
+   `make-gcd-caller-frame`).
+2. **Seven local constraint-discharge lemmas**, each `gcd-*`, each
+   stated with the witness calls in *closed symbolic form* (i.e. with
+   `(gcd-body-state a b)` rather than its expansion) so that the
+   rewrites match what `:functional-instance` emits as subgoals.
+3. **`gcd-func-correct-raw`** (local) — the single `:functional-instance`
+   step, stated with the witnesses substituted literally.
+4. **`gcd-func-correct`** (exported) — unfolds the witnesses to the
+   user-facing shape with `(make-gcd-call-state a b)` and
+   `(acl2::nonneg-int-gcd a b)`.
+
+Net effect: ~330 lines removed from `proof-gcd-spec.lisp`, and the
+entire `:call → body → return → :done` glue is now proved once, in
+the wrap book, for any future function.
+
+### A.3 Recipe to reuse `wasm-call-wrap` for another function `foo`
+
+Pre-requisite: you already have `foo-impl-correct-state` of the shape
+"after `(foo-total-fuel a b)` steps from `(make-foo-state a b
+call-tail store)`, the callee has `instrs=nil`, `labels=nil`, top
+operand = spec value, and the ten state-projection conjuncts hold".
+
+Then:
+
+1. Prove `foo-func-call-enters-body`: one step of `:call` from the
+   `make-foo-call-state a b` matches `make-foo-state a b (list
+   (wrap-popped-frame)) <store>`. (The non-local helper
+   `wrap-popped-frame` exported by `wasm-call-wrap` is exactly the
+   post-pop caller frame with `instrs = '((:call 0))` and empty
+   operand stack.)
+2. Add `(include-book "wasm-call-wrap")`.
+3. Write the six concrete witnesses. Keep them thin — `foo-the-func`
+   returns the `defconst`; `foo-body-state` is just `make-foo-state`
+   with `call-tail = (list (wrap-popped-frame))` and `store = *foo-store*`;
+   `foo-body-fuel-fn` wraps `foo-total-fuel`.
+4. Discharge the seven constraint lemmas as `local defthm`s. The
+   hardest (13-conjunct shape) is a direct specialization of
+   `foo-impl-correct-state`.
+5. State `foo-func-correct-raw` as a `local defthm` using
+
+   ```lisp
+   :hints (("Goal"
+            :use ((:functional-instance
+                   call-to-done
+                   (the-func   foo-the-func)
+                   (input-ok   foo-input-ok)
+                   (spec-val   foo-spec-val)
+                   (make-call-frame foo-make-call-frame)
+                   (make-body-state foo-body-state)
+                   (body-fuel  foo-body-fuel-fn)))
+            :in-theory (e/d ()
+                            (foo-body-state foo-body-fuel-fn
+                             foo-input-ok  foo-spec-val
+                             foo-the-func  (:executable-counterpart foo-the-func)
+                             wrap-popped-frame wrap-final-frame
+                             foo-make-call-frame foo-make-body-state
+                             current-label-stack current-instrs
+                             current-operand-stack current-frame
+                             top-frame))))
+   ```
+6. Write `foo-func-correct` that unfolds the witnesses back to the
+   user-facing form.
+7. The `defun-sk foo-halts-with` wrapper is boilerplate as before.
+
+### A.4 Gotchas discovered in the refactor
+
+These are not obvious from the ACL2 manual and cost many iterations:
+
+* **`defaggregate` constructors are macros.** `make-state`,
+  `make-frame`, and `make-funcinst` cannot appear in `:in-theory`
+  lists — doing so causes a hard error at certify time. Disable the
+  underlying wrapper `defun`s (e.g. `make-gcd-state`,
+  `make-gcd-caller-frame`) instead.
+
+* **Executable-counterpart of a nullary witness.** If your witness is
+  `(defun foo-the-func () *foo-func*)`, ACL2 will happily reduce
+  `(foo-the-func)` to the quoted value via its executable counterpart
+  during the `:functional-instance` constraint subgoals, which
+  prevents your `foo-the-func`-based rewrite rules from firing. You
+  must add `(:executable-counterpart foo-the-func)` to the disable
+  list — not just `foo-the-func` itself.
+
+* **State a `call-to-done`-style exported theorem with literal
+  constructors.** If the statement of the exported theorem calls
+  non-local helper defuns that wrap `make-state` / `make-frame`
+  (e.g. a `wrap-call-state` defun), then a client's
+  `:functional-instance` cannot substitute away the `wrap-*` names and
+  the generated constraints won't match the client's witnesses. Keep
+  the public statement at the level of `make-state` / `make-frame`
+  calls applied to abstract signature invocations.
+
+* **Keep constraint-discharge lemmas in closed symbolic form.** The
+  LHS of each `gcd-*` rewrite must be stated in terms of the witness
+  calls (`(gcd-body-state a b)`, `(gcd-body-fuel-fn a b)`), not their
+  `make-gcd-state` / `gcd-total-fuel` expansions — otherwise the
+  expansion happens once, the rewrite rules stop matching, and the
+  `:functional-instance` subgoal sits there unsimplified.
+
+* **Helper defuns on the call-stack projection are enabled by default.**
+  `current-label-stack`, `current-operand-stack`, `current-frame` are
+  ordinary `defun`s (not `defund`). They will unfold across the
+  `run`-result in subgoals and block rewriting by the shape lemma.
+  Disable them explicitly in the raw instantiation's `:in-theory`.
+  (`current-instrs`, `top-frame`, `top-operand`,
+  `operand-stack-height` are already `defund` — still worth disabling
+  for belt-and-braces.)
+
+* **Non-local witness helpers only.** Any symbol appearing in the
+  exported `call-to-done` statement must be defined outside the
+  `encapsulate`. In `wasm-call-wrap` this is why `wrap-popped-frame`
+  is a top-level `defun` rather than a local one — the exported
+  theorem's post-state mentions it.
+
 
