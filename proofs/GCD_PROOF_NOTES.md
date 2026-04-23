@@ -746,3 +746,159 @@ These are not obvious from the ACL2 manual and cost many iterations:
   theorem's post-state mentions it.
 
 
+
+## Appendix B — proof-gcd-measure: measure-based termination via functional instantiation
+
+Companion book [proofs/proof-gcd-measure.lisp](proof-gcd-measure.lisp)
+re-proves GCD termination by functionally instantiating the abstract
+framework in [proofs/wasm-measure-semantics.lisp](wasm-measure-semantics.lisp),
+rather than computing an explicit fuel function. Final exported
+theorem:
+
+```lisp
+(defthm gcd-run-reaches-terminal
+  (implies (gcd-reachable s)
+           (and (natp (gcd-run-to-terminal-fuel s))
+                (terminalp (run (gcd-run-to-terminal-fuel s) s)))))
+```
+
+### B.1 Witnesses
+
+| Abstract signature | GCD witness |
+|---|---|
+| `reachable`            | `gcd-reachable` (defun-sk over 3-elt u32 list) |
+| `mstep`                | `gcd-mstep` = `(run (gcd-mstep-count s) s)` |
+| `mstep-count`          | 13 if `b≠0`, 6 if `b=0`, else 0 |
+| `state-measure`        | `(nfix (+ 1 (gcd-b s)))` |
+| `run-to-terminal-fuel` | `gcd-run-to-terminal-fuel` (see B.3) |
+
+### B.2 The `syntaxp` rule-ordering pattern
+
+Two rewrite rules target `gcd-meas-b` (a structural extractor of the
+`b` local):
+
+1. **Structural** on a known constructor:
+   `(gcd-meas-b (make-loop-entry-state a b c ct st)) = b`.
+2. **General** when `s` is reachable:
+   `(gcd-meas-b s) = (gcd-b s)` — lets us transport the measure
+   decrease through `gcd-measure-decreases`'s step hypothesis.
+
+If the general rule fires on `(make-loop-entry-state ...)` it
+collapses the LHS to opaque `(gcd-b ...)` before the structural rule
+gets a chance. Fix: guard the general rule with
+
+```lisp
+(syntaxp (not (and (consp s) (eq (car s) 'make-loop-entry-state))))
+```
+
+General pattern: when two rules on the same function compete and you
+want the structural rule to win on known constructors, add a
+`syntaxp` hypothesis to the general rule that blocks it when the
+argument is that constructor.
+
+### B.3 Functional instantiation of a recursive witness
+
+The abstract framework's `run-to-terminal-fuel` is an ordinary
+`defun` (outside the encapsulate) whose body calls the constrained
+symbols `reachable`, `terminalp`, `mstep`, and `mstep-count`. If you
+`:functional-instance` `run-reaches-terminal-from-reachable`
+substituting only those four, ACL2 emits an unprovable constraint:
+
+```
+Subgoal 5.2
+(IMPLIES (GCD-REACHABLE S)
+         (EQUAL (RUN-TO-TERMINAL-FUEL S)
+                (+ (GCD-MSTEP-COUNT S)
+                   (RUN-TO-TERMINAL-FUEL (GCD-MSTEP S)))))
+```
+
+— i.e. ACL2 insists that the *abstract* `run-to-terminal-fuel`
+satisfies its defining recursion equation on the *concrete*
+witnesses, which it doesn't.
+
+**Fix:** introduce a concrete counterpart
+
+```lisp
+(defun gcd-run-to-terminal-fuel (s)
+  (declare (xargs :measure (gcd-state-measure s)
+                  :well-founded-relation o<
+                  :verify-guards nil
+                  :hints (("Goal"
+                           :use ((:instance gcd-measure-decreases))
+                           :in-theory (e/d (gcd-state-measure)
+                                           (gcd-measure-decreases))))))
+  (cond ((not (gcd-reachable s)) 0)
+        ((terminalp s) 0)
+        (t (+ (gcd-mstep-count s)
+              (gcd-run-to-terminal-fuel (gcd-mstep s))))))
+```
+
+and add `(run-to-terminal-fuel gcd-run-to-terminal-fuel)` to the
+`:functional-instance` substitution. The termination hint `:use
+gcd-measure-decreases` is the key: it's the framework's
+measure-decrease obligation, which you've already discharged.
+
+### B.4 Stable-under-simplificationp computed hint
+
+Five constraint subgoals remain after substitution, each needing a
+different combination of the `:rule-classes nil` bridge lemmas
+(`gcd-mstep-is-run`, `gcd-mstep-statep-or-terminalp`,
+`gcd-measure-decreases`, `gcd-reachable-preserved`), the `:expand`
+of `gcd-run-to-terminal-fuel`, and an `enable` of
+`gcd-mstep-count`. Rather than enumerate per-subgoal hints (which
+break when ACL2's subgoal numbering shifts), supply a single
+stable-under-simplificationp hint that fires everywhere simplification
+stalls:
+
+```lisp
+:hints (("Goal"
+         :use ((:functional-instance
+                run-reaches-terminal-from-reachable
+                (mstep                gcd-mstep)
+                (mstep-count          gcd-mstep-count)
+                (reachable            gcd-reachable)
+                (state-measure        gcd-state-measure)
+                (run-to-terminal-fuel gcd-run-to-terminal-fuel)))
+         :in-theory (disable run-reaches-terminal-from-reachable))
+        (and stable-under-simplificationp
+             '(:use ((:instance gcd-mstep-is-run)
+                     (:instance gcd-mstep-statep-or-terminalp)
+                     (:instance gcd-measure-decreases)
+                     (:instance gcd-reachable-preserved))
+               :expand ((gcd-run-to-terminal-fuel s))
+               :in-theory (enable gcd-mstep-count))))
+```
+
+### B.5 Recipe for another function `foo`
+
+1. Define `foo-reachable` (a `defun-sk` over a witness list),
+   accessor defuns for each local component (`foo-a`, `foo-b`, ...),
+   a `foo-reachable-canonical :rule-classes nil` lemma, and
+   `statep-when-foo-reachable` as `:forward-chaining`.
+2. Define `foo-mstep-count` (piecewise natural), `foo-mstep = (run
+   (foo-mstep-count s) s)`, and `foo-mstep-is-run :rule-classes nil`.
+3. Define `foo-state-measure` to be a natural ordinal that strictly
+   decreases across `foo-mstep`. For a loop with counter `b`, use
+   `(nfix (+ 1 (foo-b s)))`.
+4. Discharge the framework constraints as `defthm`s:
+   `foo-mstep-statep-or-terminalp :rule-classes nil`,
+   `foo-measure-decreases`, `foo-reachable-preserved`,
+   `foo-mstep-count-positive :linear`, `o-p-of-foo-state-measure`.
+5. Define the concrete `foo-run-to-terminal-fuel` per B.3.
+6. State `foo-run-reaches-terminal` via `:functional-instance` of
+   `run-reaches-terminal-from-reachable` with all five witnesses,
+   dispatching leftover subgoals with the B.4 computed hint.
+
+### B.6 Prerequisites to have in hand
+
+- A low-level "N steps from constructor shape land on next
+  constructor shape" lemma per transition (§2 of this note's Layer A
+  applies unchanged); `proof-gcd-measure` uses `loop-entry-step-case`
+  from `proof-gcd-spec` for the `b≠0` case and proves
+  `loop-entry-exit-6` for `b=0`.
+- The abstract framework exports `terminalp`, `run-to-terminal`,
+  `run-to-terminal-fuel`, `run-reaches-terminal-from-reachable`,
+  plus `natp-of-mstep-count`, `mstep-count-positive`,
+  `reachable-preserved-by-mstep`, `measure-decreases-on-mstep`,
+  `o-p-of-state-measure`, `mstep-is-run :rule-classes nil`, and
+  `mstep-statep-or-terminalp :rule-classes nil`.
