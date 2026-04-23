@@ -324,3 +324,219 @@ Candidates for a shared arithmetic bridge book:
   main theorem in one form. This is how the kestrel loop-invariant
   books work and would scale much better than the hand-rolled style
   here.
+
+---
+
+## 8. gcd-v2: shared utility books + parameterized state builders
+
+After landing the §1 result we refactored `proof-gcd-spec.lisp` to
+enable reuse across functions and to lift the theorem to start from
+`*gcd-func*` under the WASM `(:call 0)` calling convention.
+
+### 8.1 Shared utility books
+
+Two function-independent books were extracted:
+
+- [proofs/wasm-run-utils.lisp](proofs/wasm-run-utils.lisp):
+  `*wasm-exec-theory*` (the "enable the interpreter" theory),
+  `not-statep-of-done`, `not-statep-of-trap`, `run-ind`, and the
+  pivotal `run-split-when-statep`.
+- [proofs/wasm-arith-utils.lisp](proofs/wasm-arith-utils.lisp):
+  `u32p-of-mod`, `bvmod-32-when-u32`, `nfix-when-natp`,
+  `nonneg-int-mod-is-mod`, `nonneg-int-gcd-of-0-{left,right}`.
+
+Neither book depends on `gcd` specifics; both certify standalone and
+are `include-book`ed by `proof-gcd-spec`.
+
+### 8.2 Parameterized state builders
+
+The original `make-gcd-state` / `make-loop-entry-state` hardcoded
+`:call-stack (list ...)` with empty caller tail and a fixed
+`*gcd-store*`. To make the body-level result composable with a
+calling convention that pushes a caller frame underneath, the
+builders now take two extra parameters:
+
+```lisp
+(defun make-gcd-state (a b call-tail store) ...)
+(defun make-loop-entry-state (a b tmp call-tail store) ...)
+```
+
+where `call-tail` is a `call-stackp` to sit beneath the active frame
+and `store` is any `storep`. All Layer A lemmas, the iteration
+rewrite `run-plus-at-loop-entry`, the induction `gcd-loop-ind`, and
+the main body theorem `gcd-loop-entry-correct` carry these parameters
+through unchanged. Consequence: `gcd-impl-correct` is proved once,
+for arbitrary `call-tail` / `store`, so a caller's frame is already
+"underneath" when we want to lift.
+
+Trick: lemmas stating `statep`, return-arity, and store preservation
+of the body-run are now free polymorphic facts — ACL2 doesn't have
+to reprove them at the lift layer.
+
+### 8.3 Lift to `*gcd-func*` and the `(:call 0)` entry state
+
+Goal: prove a theorem about `*gcd-func*` invoked via the standard
+calling convention, not about an already-set-up frame. The final
+result (UNCOMMITTED at the time this note was written):
+
+```lisp
+(defthm gcd-func-correct
+  (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
+           (equal (run (gcd-func-total-fuel a b)
+                       (make-gcd-call-state a b))
+                  `(:done ,(make-state
+                            :store *gcd-store*
+                            :call-stack (list (gcd-caller-frame-final a b))
+                            :memory nil :globals nil)))))
+
+(defthm gcd-func-correct-result
+  (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
+           (equal (gcd-done-result
+                   (run (gcd-func-total-fuel a b)
+                        (make-gcd-call-state a b)))
+                  (make-i32-val (acl2::nonneg-int-gcd a b)))))
+```
+
+`make-gcd-call-state` is a one-frame state whose instrs are `(:call 0)`
+and whose operand stack is `(make-i32-val b) (make-i32-val a)` —
+exactly the shape used in `tests/test-spot-check.lisp`.
+`gcd-done-result` matches that test file's `get-result` extractor.
+
+### 8.4 The 4-step lift trace
+
+The full run splits into four symbolic steps glued by
+`run-split-when-statep`:
+
+```
+ S0                 S1                  S2                S3              S4
+ call-state ─1→ body-start-state ─N→ body-end-state ─1→ after-return ─1→ :done
+ (:call 0)      (execute-call         (gcd-total-fuel   (return-from-    (run-1-from-
+  pending)       advances            steps of body)     function)         after-return)
+                 instrs)                                 fires)
+
+ total fuel = 1 + gcd-total-fuel a b + 2 = gcd-func-total-fuel a b
+```
+
+Named lemmas for each edge:
+
+| Edge | Lemma | Proof technique |
+|---|---|---|
+| S0→S1 | `gcd-func-call-enters-body` | `:expand (run 1 …)`, enable `execute-instr`, `execute-call`, frame/store accessors |
+| S1→S2 | `gcd-impl-correct-state` | reuse body-level theorem with `call-tail = (list (gcd-caller-frame-popped))`, `store = *gcd-store*` |
+| S2→S3 | `return-from-body-end` | `:use body-end-call-stack-structure` (structural facts about S2), enable `return-from-function`, `push-vals`, `top-n-operands`, `push-operand`, `pop-operand` |
+| S3→S4 | `run-1-from-after-return` | single `:expand (run 1 …)`, enable `current-instrs`/`current-label-stack` so step sees instrs=nil and label-stack=nil, falls through to `return-from-function` on single-frame stack → `(:done ...)` |
+| glue  | `gcd-func-correct` | `:use` all four edges + `statep-after-body` + two instances of `run-split-when-statep`, enable only the fuel-arithmetic definitions, disable `(:definition run)` |
+
+### 8.5 The preservation pattern (**important**)
+
+Making S1→S2 usable at the S2→S3 step required proving — by
+induction — that the body run preserves *every projection of the
+state that S2→S3's single step reads*. The original body-level
+theorem only stated one invariant (top-of-operand-stack equals
+`nonneg-int-gcd`). `return-from-function` also reads:
+
+1. `(cdr call-stack)` — must equal `call-tail`
+2. `(frame->return-arity (car call-stack))` — must be 1
+3. `(state->store)` — must equal `store`
+4. `(consp call-stack)` — must be non-empty
+5. `(consp (frame->operand-stack (car call-stack)))` — non-empty to take top
+6. `(<= 1 (operand-stack-height …))` — for `top-n-operands 1` guard
+7. `(frame->instrs (car call-stack))` — must be nil (no pending body instr)
+8. `(frame->label-stack (car call-stack))` — must be nil (no pending label)
+9. `(state->memory) = nil`, `(state->globals) = nil`, `(state->table) = nil`
+
+All nine are proved by a **single** parallel induction
+`gcd-loop-entry-preservation` over `gcd-loop-ind a b tmp`. The base
+case `(b = 0)` follows from symbolic execution of the final 4 steps
+(`loop-entry-base-case-preservation`). The step case uses the already
+proved iteration rewrite `run-plus-at-loop-entry` to reduce to the IH.
+
+Do not try to derive these properties *after* the main theorem via
+`:use body-end-call-stack-structure`; ACL2 will fail to connect
+symbolic structural facts to `consp`/`len` on the operand stack
+without the inductive invariant. Add them as conjuncts of the
+preservation lemma up front.
+
+The parallel `gcd-impl-correct-state` then asserts all nine (plus
+top-of-operand-stack), one-shot `:use` of the preservation lemma.
+`body-end-call-stack-structure` re-exports the same set at the
+`gcd-body-end-state` alias.
+
+### 8.6 Lessons specific to lifting
+
+Adds to §3:
+
+**8.6.a — Preservation-by-induction > force-plus-hint.**
+When the prover can't close a shape conjunct at the lift boundary
+(e.g. `(consp ostack)`, `(= memory nil)`), the right move is to add
+it as a conjunct of the *body-level* preservation lemma. It costs
+nothing at the base case (symbolic execution proves it trivially)
+and the step case reuses the existing rewrite. Piling the missing
+fact into a `:use`/`:in-theory` hint at the lift layer wastes time
+and often doesn't work.
+
+**8.6.b — The 3 "one-step" lemmas each need their own theory.**
+S0→S1, S2→S3, S3→S4 are all "one step of `run`", but the step that
+fires is different each time (`step` → `execute-instr` →
+`execute-call` for S0→S1; `return-from-function` on a non-final frame
+for S2→S3; `return-from-function` on the sole frame for S3→S4). Each
+lemma therefore enables a different subset of interpreter helpers.
+Trying to prove them with a unified theory causes tens of subgoals.
+
+**8.6.c — `make-i32-val` is a macro; `top-n-operands` and `push-vals`
+must be :expanded**. In the S2→S3 proof, `top-n-operands 1` and
+`push-vals (cons v nil)` both need unfolding with free-variable
+`:expand` hints — ACL2 doesn't reduce them via `:in-theory (enable …)`
+because the arguments are symbolic. Pattern:
+
+```lisp
+:expand ((:free (stack)     (top-n-operands 1 stack nil))
+         (:free (stack acc) (top-n-operands 0 stack acc))
+         (:free (v rest stack) (push-vals (cons v rest) stack))
+         (:free (stack)     (push-vals nil stack)))
+```
+
+**8.6.d — `framep`/`statep` of concrete frames need `valp`.**
+`framep` ⇒ `operand-stackp` ⇒ `val-listp` ⇒ `valp` (a `defund`).
+When proving `framep-of-gcd-caller-frame-final` where the stack is
+`(list (make-i32-val (nonneg-int-gcd a b)))`, you must enable `valp`
+— not just `i32-valp`. `valp` is disjunctive and its body is hidden
+behind the `defund`.
+
+**8.6.e — `not-equal-done-car-when-statep`**. The lift step S3→S4
+asks ACL2 to rule out the `(:done …)` branch of the previous step's
+return value. Helper:
+
+```lisp
+(defthm not-equal-done-car-when-statep
+  (implies (statep x) (not (equal :done (car x))))
+  :hints (("Goal" :use ((:instance not-statep-of-done (x (cdr x))))
+                  :in-theory (disable not-statep-of-done))))
+```
+
+paired with a `statep-of-return-from-body-end` lemma, lets the
+`run 2` unfolding avoid case-splitting on the returned tag.
+
+### 8.7 Re-runnable iteration recipe (v2)
+
+Amends §4's recipe for functions invoked via `(:call idx)`:
+
+1. Do everything in §4 with **parameterized** builders
+   `make-foo-state args call-tail store` and its loop-entry cousin.
+   Prove the body-level result for arbitrary `call-tail`/`store`.
+2. In a separate section, define `*foo-func*`, `*foo-store* = (list
+   *foo-func*)`, `make-foo-call-state args` (caller frame with
+   `:instrs '((:call idx))` and WASM-order operand stack), and
+   `make-foo-caller-frame-popped` / `-final` (the "empty-instrs after
+   the call" shapes).
+3. Prove the four edge lemmas S0→S1..S3→S4. Each is 10–30 lines;
+   boilerplate the hints from §8.4.
+4. Strengthen the body-level preservation lemma with **every
+   projection** of the state that your S2→S3 step reads. Re-certify.
+5. Compose with `run-split-when-statep` in `foo-func-correct`; extract
+   via `foo-done-result` for the user-facing corollary.
+
+This pattern should now cost ~1 hr per additional function body
+once the preservation-conjunct set and state-builder generalization
+tricks are internalized.
+
