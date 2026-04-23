@@ -22,6 +22,7 @@
 (include-book "../execution")
 (include-book "wasm-run-utils")    ; run-split-when-statep, *wasm-exec-theory*, not-statep-of-*
 (include-book "wasm-arith-utils") ; u32p-of-mod, bvmod-32-when-u32, nonneg-int-* bridges
+(include-book "wasm-loader")     ; load-wasm-funcinsts: .wasm -> (funcinst ...)
 
 ;; arithmetic-5/top is needed locally to discharge the termination measure
 ;; `(< (mod a b) b)` for gcd-loop-fuel and for linear-arith goals on mod
@@ -29,27 +30,24 @@
 (local (include-book "arithmetic-5/top" :dir :system))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; The program under test — kept in sync with tests/test-spot-check.lisp.
+;; The program under test is loaded directly from the .wasm binary
+;; produced by `wat2wasm tests/oracle/gcd.wat`. The WAT source is the
+;; canonical definition of the program; this book parses the binary at
+;; certification time rather than hand-transcribing the instruction list.
+;;
+;; Pipeline:  gcd.wat -(wat2wasm)-> gcd.wasm -(parse-binary)-> sections
+;;            -(module->funcinsts)-> (list *gcd-func*)
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Program under test — body mirrors tests/test-spot-check.lisp but we
-;; execute it directly in a single frame (no `:call` wrapper), as in
-;; proof-abs-e2e.lisp. This keeps the result a plain state (no :done tag).
-
-(defconst *gcd-body*
-  '((:block 0 ((:loop 0 ((:local.get 1)
-                         (:i32.eqz)
-                         (:br_if 1)
-                         (:local.get 1)
-                         (:local.set 2)
-                         (:local.get 0)
-                         (:local.get 1)
-                         (:i32.rem_u)
-                         (:local.set 1)
-                         (:local.get 2)
-                         (:local.set 0)
-                         (:br 0)))))
-    (:local.get 0)))
+(make-event
+ (mv-let (erp funcs acl2::state)
+   (load-wasm-funcinsts "../tests/oracle/gcd.wasm" acl2::state)
+   (if erp
+       (mv (msg "Failed to load gcd.wasm: ~x0" erp) nil acl2::state)
+     (mv nil
+         `(progn
+            (defconst *gcd-func* ',(first funcs))
+            (defconst *gcd-body* ',(funcinst->body (first funcs))))
+         acl2::state))))
 
 (defun make-gcd-state (a b call-tail store)
   ;; `call-tail` is the list of additional (caller) frames beneath the
@@ -551,14 +549,9 @@
 ;;     "result" state yield `(:done <caller-state-with-result>)`.
 ;;   - gcd-func-correct          : stitched together via run-split.
 
-;; The funcinst we're running.  Structurally identical to the one in
-;; tests/test-spot-check.lisp (§1).  We redefine it locally so this book
-;; does not depend on the tests package.
-(defconst *gcd-func*
-  (make-funcinst
-   :param-count 2 :local-count 1 :return-arity 1
-   :body *gcd-body*))
-
+;; The funcinst `*gcd-func*` and its body `*gcd-body*` are loaded from
+;; `tests/oracle/gcd.wasm` at the top of this book (see the make-event
+;; above). We reuse them here.
 (defconst *gcd-store* (list *gcd-func*))
 
 ;; The caller frame: invokes `(:call 0)` with args (a, b) already pushed.
