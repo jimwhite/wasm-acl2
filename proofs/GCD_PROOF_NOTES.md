@@ -540,3 +540,39 @@ This pattern should now cost ~1 hr per additional function body
 once the preservation-conjunct set and state-builder generalization
 tricks are internalized.
 
+## 9. Fuel-free partial-correctness wrapper
+
+The body-level and lift theorems both state fuel explicitly
+(`gcd-total-fuel`, `gcd-func-total-fuel`). For a user-facing result
+this is noisy; `defun-sk` packages the existential once:
+
+```lisp
+(defun-sk gcd-halts-with (a b v)
+  (exists fuel
+    (and (natp fuel)
+         (equal (run fuel (make-gcd-call-state a b))
+                `(:done ,(make-state
+                          :store *gcd-store*
+                          :call-stack (list (gcd-caller-frame-final a b))
+                          :memory nil :globals nil)))
+         (equal v (make-i32-val (acl2::nonneg-int-gcd a b))))))
+
+(defthm gcd-func-halts
+  (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
+           (gcd-halts-with a b (make-i32-val (acl2::nonneg-int-gcd a b))))
+  :hints (("Goal"
+           :use ((:instance gcd-halts-with-suff
+                            (fuel (gcd-func-total-fuel a b)) ...)
+                 (:instance gcd-func-correct ...)))))
+```
+
+Key move: `defun-sk` auto-generates a `-suff` rule of the shape "if
+you can exhibit a witness for `fuel`, the existential holds". Since
+`gcd-func-correct` is already a witness instance, a single `:use`
+closes the goal. No new work; the wrapper is pure packaging.
+
+The pattern generalizes trivially: for any function `foo` with
+`foo-func-correct` at fuel `foo-func-total-fuel`, the companion
+`defun-sk foo-halts-with` + `foo-func-halts` is ~15 boilerplate lines.
+
+
