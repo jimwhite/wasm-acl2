@@ -1,22 +1,33 @@
-;; WASM 1.0 ACL2 — GCD end-to-end correctness specification (in progress)
+;; WASM 1.0 ACL2 — GCD end-to-end correctness
 ;;
-;; The WASM program `*gcd-func*` (from tests/test-spot-check.lisp) implements
-;; the Euclidean algorithm on unsigned 32-bit integers:
+;; The WASM program under test implements the Euclidean algorithm on
+;; unsigned 32-bit integers:
 ;;
 ;;     while (b != 0) { t = b; b = a rem_u b; a = t; }
 ;;     return a;
 ;;
+;; It is loaded at certification time from the binary-format module in
+;; `tests/oracle/gcd.wasm` (itself produced from `tests/oracle/gcd.wat`
+;; via `wat2wasm`; see `Makefile` and `tools/README.md`).
+;;
 ;; The ACL2 arithmetic book `arithmetic/mod-gcd` already defines the
 ;; mathematical spec `nonneg-int-gcd` and proves it is a GCD.
 ;;
-;; Strategy: build up from concrete symbolic-execution lemmas (in the
-;; style of proofs/proof-loop-spec.lisp) toward the general theorem.
+;; Strategy: build up from concrete symbolic-execution lemmas toward the
+;; general theorem (cf. proofs/proof-loop-spec.lisp, proof-abs-e2e.lisp).
 ;;
-;;   Phase 1 (this file)  — Base case lemma: when b = 0, the WASM
-;;                          implementation returns (make-i32-val a).
-;;   Phase 2 (future)     — Step-case lemma: one full loop iteration
-;;                          reduces (a,b) to (b, a rem_u b).
-;;   Phase 3 (future)     — Induction on nonneg-int-gcd to combine.
+;;   §1. Base case     — when b = 0, the WASM impl returns (i32 a).
+;;   §2. Step case     — one loop iteration reduces (a, b) to (b, a mod b).
+;;   §3. Induction     — combine §1 and §2 via `gcd-loop-fuel` /
+;;                       `gcd-loop-ind` to match `nonneg-int-gcd`.
+;;   §4. Lift to call  — run the `(:call 0)` entry and `return-from-
+;;                       function` exit so the theorem is stated at the
+;;                       `*gcd-func*` funcinst interface, ending in :done.
+;;   §5. Fuel-free     — a `defun-sk gcd-halts-with` existential wrapper
+;;                       so user-facing consumers do not mention fuel.
+;;
+;; See `GCD_PROOF_NOTES.md` for the lessons learned and the recipe to
+;; replicate this for another function.
 
 (in-package "WASM")
 (include-book "../execution")
@@ -84,7 +95,7 @@
 (local (defconst *gcd-exec-theory* *wasm-exec-theory*))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Phase 1: Base case. When b = 0, running the WASM gcd returns a.
+;; §1. Base case. When b = 0, running the WASM gcd returns a.
 
 (defthm gcd-impl-base-case
   (implies (unsigned-byte-p 32 a)
@@ -103,7 +114,7 @@
 (value-triple (cw "~% - gcd-impl-base-case: gcd(a,0) = a at the WASM level (Q.E.D.)~%"))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Phase 2: Step-case lemma.
+;; §2. Step-case lemma.
 ;;
 ;; After 2 steps from `make-gcd-state a b`, we arrive at a "loop-entry"
 ;; state: locals=(a b 0), instrs = loop-body, label-stack = (loop, block).
@@ -220,7 +231,7 @@
 (value-triple (cw " - loop-entry-base-case: b=0 exits with a on top (Q.E.D.)~%"))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Phase 3: Induction.
+;; §3. Induction.
 ;;
 ;; Fuel function mirroring the Euclidean recursion: 4 steps for b=0,
 ;; 13 steps per iteration otherwise.
@@ -368,11 +379,13 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Preservation lemmas: the caller tail, the callee frame's return-arity,
-;; and the store are unchanged across body execution.  These are needed
-;; to drive `return-from-function` on the final wrap-up steps.
+;; the store, memory / globals / table, and the (non-empty) operand
+;; stack are all unchanged in shape across body execution.  Needed by
+;; the lifting section to drive `return-from-function` on the final
+;; wrap-up steps.
 
-;; First, strengthen loop-entry-base-case with preservation conjuncts.
-;; (We keep the original as-is and prove these independently.)
+;; Base case (`b = 0`) preservation: 10 conjuncts covering every
+;; projection the lift will read through the body-end state.
 (local
  (defthm loop-entry-base-case-preservation
    (implies (and (unsigned-byte-p 32 a)
@@ -537,17 +550,35 @@
 (value-triple (cw "====================================================~%"))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Phase 4: Lift to start from `*gcd-func*` (a `funcinst`) invoked via
-;; the `(:call 0)` calling convention. This removes all function-internal
-;; knowledge from the *interface* of the theorem — the only thing the
-;; client must know is the funcinst and the argument-passing discipline.
+;; §4. Lift to start from `*gcd-func*` (a `funcinst`) invoked via the
+;; `(:call 0)` calling convention.  This removes all function-internal
+;; knowledge from the *interface* of the theorem — the client only needs
+;; to know the funcinst and the argument-passing discipline.
 ;;
-;; The body of this lift is three small glue lemmas:
-;;   - gcd-func-call-enters-body : 1 step of `:call 0` on a call-state
-;;     yields the (generalized) body state we proved correct above.
-;;   - gcd-func-body-returns     : 2 steps past the top-of-operand-stack
-;;     "result" state yield `(:done <caller-state-with-result>)`.
-;;   - gcd-func-correct          : stitched together via run-split.
+;; The trace we stitch together is
+;;
+;;   call-state ─1→ body-start ─body-fuel→ body-end ─1→ after-return ─1→ :done
+;;     (S0)  step1   (S1)   gcd-total-fuel   (S2)  step (S3)         step (S4)
+;;
+;; with these lemmas driving the edges:
+;;
+;;   S0 → S1 : `gcd-func-call-enters-body`  (one step of `:call 0`
+;;              pushes the gcd frame on top of the caller-popped frame,
+;;              matching `make-gcd-state` with a synthetic call-tail).
+;;   S1 → S2 : `gcd-impl-correct-state`     (strengthened shape lemma:
+;;              gathers everything a subsequent `return-from-function`
+;;              step reads — call-tail, return-arity, store, operand
+;;              stack, emptiness of instrs / labels / memory / globals,
+;;              and the top operand = nonneg-int-gcd a b).
+;;   S2 → S3 : `return-from-body-end`       (one step of
+;;              `return-from-function` pops the gcd frame and leaves
+;;              the caller in `gcd-caller-frame-final`).
+;;   S3 → S4 : `run-1-from-after-return`    (one final step sees
+;;              instrs=nil, label-stack=nil, single-frame call-stack,
+;;              and emits `(:done <state>)`).
+;;
+;; The top-level theorem `gcd-func-correct` glues these with
+;; `run-split-when-statep` at each boundary.
 
 ;; The funcinst `*gcd-func*` and its body `*gcd-body*` are loaded from
 ;; `tests/oracle/gcd.wasm` at the top of this book (see the make-event
@@ -580,15 +611,6 @@
 ;; `return-from-function`) advanced its instrs past the `:call`.  This
 ;; is what will be sitting underneath the gcd frame during the body run,
 ;; and what resurfaces with the result after we return.
-(defun gcd-caller-frame-returned (r)
-  ;; `r` is the gcd return value on top of the caller's operand stack.
-  (declare (xargs :guard (valp r) :verify-guards nil))
-  (make-frame :return-arity 1
-              :locals nil
-              :operand-stack (list r)
-              :instrs nil
-              :label-stack nil))
-
 (defun gcd-caller-frame-popped ()
   ;; `:call` popped args but did not yet advance past itself; that
   ;; happens inside `return-from-function`.
@@ -879,14 +901,10 @@
                              (:definition run)
                              make-gcd-state))))))
 
-;; Auxiliary: operand stack has height >= 1 at body end.  Derived from
-;; `top-operand = make-i32-val (gcd a b)` which is a non-nil cons, so
-;; the stack must be non-empty.
-
-;; Auxiliary: operand stack has height >= 1 at body end — now follows
-;; directly from the strengthened `body-end-call-stack-structure`.
-;; (Kept as a rename/alias so return-from-body-end's :use clause
-;; continues to work.)
+;; Auxiliary alias: operand stack has height >= 1 at body end.  This
+;; follows directly from `body-end-call-stack-structure`, but
+;; `return-from-body-end` (below) references the two conjuncts by this
+;; name in its `:use` clause, so we keep the alias.
 
 (local
  (defthm body-end-operand-stack-consp
