@@ -18,7 +18,10 @@ JOBS ?= 4
 PROOF_BOOKS := $(patsubst %.lisp,%,$(wildcard proofs/proof-*.lisp))
 TEST_BOOKS  := $(patsubst %.lisp,%,$(wildcard tests/test-*.lisp))
 
-.PHONY: all top proofs tests clean
+WAT_SOURCES := $(wildcard tests/oracle/*.wat)
+WASM_BINARIES := $(patsubst %.wat,%.wasm,$(WAT_SOURCES))
+
+.PHONY: all top proofs tests clean wasm
 
 # Single cert.pl invocation so its internal dependency tracker avoids races
 # on shared prerequisites like execution.cert.
@@ -33,6 +36,16 @@ proofs:
 
 tests:
 	$(CERT) --acl2 $(ACL2) -j $(JOBS) $(TEST_BOOKS)
+
+# Compile .wat oracle programs to .wasm with the local JS-based wat2wasm.
+# Requires `npm install` in tools/ (run once: `make tools/node_modules`).
+wasm: $(WASM_BINARIES)
+
+tests/oracle/%.wasm: tests/oracle/%.wat tools/wat2wasm.mjs | tools/node_modules
+	node tools/wat2wasm.mjs $< -o $@
+
+tools/node_modules:
+	cd tools && npm install
 
 clean:
 	find . \( -name '*.cert' -o -name '*.cert.out' -o -name '*.port' \
