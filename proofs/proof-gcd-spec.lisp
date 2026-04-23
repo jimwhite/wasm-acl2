@@ -20,8 +20,13 @@
 
 (in-package "WASM")
 (include-book "../execution")
-(include-book "arithmetic/mod-gcd" :dir :system)
-(include-book "kestrel/bv/bvmod" :dir :system)
+(include-book "wasm-run-utils")    ; run-split-when-statep, *wasm-exec-theory*, not-statep-of-*
+(include-book "wasm-arith-utils") ; u32p-of-mod, bvmod-32-when-u32, nonneg-int-* bridges
+
+;; arithmetic-5/top is needed locally to discharge the termination measure
+;; `(< (mod a b) b)` for gcd-loop-fuel and for linear-arith goals on mod
+;; that are not covered by wasm-arith-utils' published rewrites.
+(local (include-book "arithmetic-5/top" :dir :system))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; The program under test — kept in sync with tests/test-spot-check.lisp.
@@ -70,33 +75,10 @@
 ;; Theory for symbolic execution (mirrors proof-loop-spec.lisp /
 ;; proof-abs-e2e.lisp).
 
-(local (defconst *gcd-exec-theory*
-  '(run execute-instr
-    execute-block execute-loop
-    execute-local.get execute-local.set
-    execute-i32.eqz execute-i32.rem_u
-    execute-br execute-br_if
-    current-frame current-instrs current-operand-stack
-    current-label-stack current-locals
-    update-current-operand-stack update-current-instrs
-    update-current-label-stack update-current-locals
-    complete-label return-from-function
-    make-i32-val i32-valp i32-const-argsp
-    local-idx-argsp no-argsp
-    push-operand top-operand pop-operand top-n-operands push-vals
-    operand-stack-height empty-operand-stack operand-stackp
-    localsp framep top-frame push-call-stack pop-call-stack call-stackp
-    valp i64-valp u32p u64p val-listp
-    label-entryp label-entry->arity label-entry->continuation
-    label-entry->is-loop push-label pop-label top-label
-    label-stackp nth-label pop-n-labels
-    nth-local update-nth-local
-    frame->return-arity frame->locals frame->operand-stack
-    frame->instrs frame->label-stack
-    state->store state->call-stack state->memory state->globals state->table
-    state
-    frame
-    statep)))
+;; Symbolic-execution enable list: the reusable one from wasm-run-utils.
+;; (We defer handling of `:call`/`execute-call` until the lift-to-*gcd-func*
+;; section below, which enables those as extra rules in its own hints.)
+(local (defconst *gcd-exec-theory* *wasm-exec-theory*))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Phase 1: Base case. When b = 0, running the WASM gcd returns a.
@@ -187,22 +169,8 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Step case: from a loop-entry state with b ≠ 0, 13 steps reach
 ;; loop-entry(b, (mod a b), b).
-
-(local (include-book "arithmetic-5/top" :dir :system))
-
-(local (defthm u32p-of-mod
-  (implies (and (unsigned-byte-p 32 a)
-                (unsigned-byte-p 32 b))
-           (unsigned-byte-p 32 (mod a b)))
-  :hints (("Goal" :cases ((equal b 0))))))
-
-(local (defthm bvmod-32-when-u32
-  ;; i32.rem_u on u32 inputs with nonzero divisor is plain integer mod.
-  (implies (and (unsigned-byte-p 32 a)
-                (unsigned-byte-p 32 b)
-                (not (equal b 0)))
-           (equal (acl2::bvmod 32 a b) (mod a b)))
-  :hints (("Goal" :in-theory (enable acl2::bvmod)))))
+;;
+;; The u32p/bvmod bridge lemmas live in `wasm-arith-utils.lisp`.
 
 (defthm loop-entry-step-case
   (implies (and (unsigned-byte-p 32 a)
@@ -265,43 +233,8 @@
     (gcd-loop-ind b (mod a b) b)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Run-split lemma: when `run M state` lands in a proper state (no trap,
-;; no :done), then `run (+ M N) state = run N (run M state)`.
-;;
-;; This is needed to glue together symbolic-execution lemmas across an
-;; inductive proof: we can take 13 steps to reach the next loop entry,
-;; then apply the induction hypothesis on the remaining N steps.
-
-(local (defun run-ind (m state)
-  (declare (xargs :measure (nfix m)))
-  (if (zp m)
-      state
-    (if (not (consp (current-instrs state)))
-        (if (consp (current-label-stack state))
-            (let ((ns (complete-label state)))
-              (if (eq :trap ns) state (run-ind (+ -1 m) ns)))
-          (let ((r (return-from-function state)))
-            (cond ((eq :trap r) state)
-                  ((and (consp r) (eq :done (first r))) state)
-                  (t (run-ind (+ -1 m) r)))))
-      (let ((ns (step state)))
-        (if (eq :trap ns) state (run-ind (+ -1 m) ns)))))))
-
-(local (defthm not-statep-of-done
-  (not (statep (cons :done x)))
-  :hints (("Goal" :in-theory (enable statep)))))
-
-(local (defthm not-statep-of-trap
-  (not (statep :trap))
-  :hints (("Goal" :in-theory (enable statep)))))
-
-(local (defthm run-split-when-statep
-  (implies (and (natp m) (natp n) (statep (run m state)))
-           (equal (run (+ m n) state)
-                  (run n (run m state))))
-  :hints (("Goal" :induct (run-ind m state)))))
-
-(value-triple (cw " - run-split-when-statep: local run-decomposition lemma (Q.E.D.)~%"))
+;; Run-split and non-arithmetic bridge lemmas live in wasm-run-utils and
+;; wasm-arith-utils; see those files.
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; statep-ness of a loop-entry state (needed to discharge the hyp of
@@ -316,23 +249,6 @@
                                      label-stackp label-entryp
                                      operand-stackp val-listp
                                      i32-valp u32p)))))
-
-(local (defthm nonneg-int-gcd-of-0-right
-  (equal (acl2::nonneg-int-gcd x 0) (nfix x))
-  :hints (("Goal" :expand ((acl2::nonneg-int-gcd x 0))))))
-
-(local (defthm nonneg-int-gcd-of-0-left
-  (equal (acl2::nonneg-int-gcd 0 x) (nfix x))
-  :hints (("Goal" :expand ((acl2::nonneg-int-gcd 0 x))
-                  :in-theory (enable acl2::nonneg-int-mod)))))
-
-(local (defthm nfix-when-natp
-  (implies (natp x) (equal (nfix x) x))))
-
-(local (defthm nonneg-int-mod-is-mod
-  (implies (and (natp a) (posp b))
-           (equal (acl2::nonneg-int-mod a b) (mod a b)))
-  :hints (("Goal" :in-theory (enable acl2::nonneg-int-mod mod floor)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Combined run/step rewrite: one loop iteration, distributed into
