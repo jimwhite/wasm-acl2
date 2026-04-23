@@ -446,12 +446,26 @@
 ;; via run-split-when-statep), and S2→S4 (run-2-from-body-end).
 
 (defthm call-to-done
+  ;; The primary export.  Stated entirely in terms of the abstract
+  ;; signature (input-ok, the-func, make-call-frame, body-fuel, spec-val)
+  ;; plus fixed concrete `make-state` / `make-frame` constructors, so that
+  ;; functional instantiation substitutes every constrained symbol and
+  ;; leaves no reference to the wrap book's internal defuns.
   (implies (and (input-ok a b)
                 (framep (make-call-frame a b)))
-           (equal (run (+ 3 (body-fuel a b)) (wrap-call-state a b))
+           (equal (run (+ 3 (body-fuel a b))
+                       (make-state
+                        :store (list (the-func))
+                        :call-stack (list (make-call-frame a b))
+                        :memory nil :globals nil))
                   `(:done ,(make-state
                             :store (list (the-func))
-                            :call-stack (list (wrap-final-frame a b))
+                            :call-stack (list (make-frame
+                                               :return-arity 1
+                                               :locals nil
+                                               :operand-stack (list (spec-val a b))
+                                               :instrs nil
+                                               :label-stack nil))
                             :memory nil :globals nil))))
   :hints (("Goal"
            :do-not-induct t
@@ -469,13 +483,13 @@
                             (n 2)
                             (state (make-body-state a b))))
            :in-theory (e/d (wrap-body-end-state
-                            wrap-call-state)
+                            wrap-call-state
+                            wrap-final-frame)
                            (call-enters-body
                             statep-of-wrap-call-state
                             statep-after-body-run
                             run-2-from-body-end
                             run-split-when-statep
-                            wrap-final-frame
                             (:definition run))))))
 
 (value-triple (cw " - wasm-call-wrap: call-to-done (S0 → :done) (Q.E.D.)~%"))

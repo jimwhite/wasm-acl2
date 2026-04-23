@@ -34,6 +34,7 @@
 (include-book "wasm-run-utils")    ; run-split-when-statep, *wasm-exec-theory*, not-statep-of-*
 (include-book "wasm-arith-utils") ; u32p-of-mod, bvmod-32-when-u32, nonneg-int-* bridges
 (include-book "wasm-loader")     ; load-wasm-funcinsts: .wasm -> (funcinst ...)
+(include-book "wasm-call-wrap")  ; generic :call / body / return wrapper
 
 ;; arithmetic-5/top is needed locally to discharge the termination measure
 ;; `(< (mod a b) b)` for gcd-loop-fuel and for linear-arith goals on mod
@@ -609,17 +610,9 @@
 
 ;; The caller frame *after* `:call 0` has popped the two args and (per
 ;; `return-from-function`) advanced its instrs past the `:call`.  This
-;; is what will be sitting underneath the gcd frame during the body run,
-;; and what resurfaces with the result after we return.
-(defun gcd-caller-frame-popped ()
-  ;; `:call` popped args but did not yet advance past itself; that
-  ;; happens inside `return-from-function`.
-  (declare (xargs :guard t :verify-guards nil))
-  (make-frame :return-arity 1
-              :locals nil
-              :operand-stack (empty-operand-stack)
-              :instrs (list '(:call 0))
-              :label-stack nil))
+;; is what sits underneath the gcd frame during the body run and
+;; resurfaces with the result after we return.  It is provided by the
+;; generic call-wrap book as `wrap-popped-frame`; we use that directly.
 
 ;; --- Entry: one step of `:call 0` ------------------------------------------
 ;;
@@ -633,7 +626,7 @@
                 (unsigned-byte-p 32 b))
            (equal (run 1 (make-gcd-call-state a b))
                   (make-gcd-state a b
-                                  (list (gcd-caller-frame-popped))
+                                  (list (wrap-popped-frame))
                                   *gcd-store*)))
   :hints (("Goal"
            :in-theory (union-theories
@@ -750,388 +743,243 @@
 
 (value-triple (cw " - gcd-impl-correct: state projections after body execution (Q.E.D.)~%"))
 
-;; --- End-to-end theorem -----------------------------------------------------
 
-(defun gcd-func-total-fuel (a b)
-  ;; 1 step to enter via `:call`; `gcd-total-fuel` steps for the body;
-  ;; 1 step to return-from-function; 1 step to signal :done.
-  (declare (xargs :verify-guards nil))
-  (+ 3 (gcd-total-fuel a b)))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; §4. End-to-end: lift `gcd-impl-correct-state` to a full `:call` → `:done`
+;; trace by functionally instantiating `call-to-done` from the generic
+;; call-wrap book.
+;;
+;; The wrap book's encapsulate has six abstract signatures plus seven
+;; constraint theorems; we discharge them with the gcd-specific witnesses
+;; below and then obtain `gcd-func-correct` in a single `:use` clause.
 
-;; Extraction: top-of-operand-stack of the caller frame in a :done state,
-;; matching tests/test-spot-check.lisp's `get-result`.
-(defun gcd-done-result (r)
+;; --- Concrete witnesses for the six abstract signatures --------------------
+
+(defun gcd-the-func ()
   (declare (xargs :guard t :verify-guards nil))
-  (if (and (consp r) (eq :done (first r)))
-      (let* ((st (second r))
-             (cs (state->call-stack st))
-             (f (car cs)))
-        (top-operand (frame->operand-stack f)))
-    r))
+  *gcd-func*)
 
-;; -- Intermediate stepping lemmas --------------------------------------------
-;;
-;; We split the `gcd-func-total-fuel a b` run into four pieces, using
-;; `run-split-when-statep` at each boundary:
-;;
-;;     call-state ─1→ body-start ─body→ body-end ─1→ after-return ─1→ :done
-;;      (S0)      step1   (S1)   Nfuel  (S2)    step (S3)        step (S4)
-;;
-;; We already have S0→S1 (`gcd-func-call-enters-body`) and S1→S2 (via
-;; `gcd-impl-correct-state`).  The final two steps (S2→S3→S4) are
-;; driven by `return-from-function`; we characterize them below.
+(defun gcd-input-ok (a b)
+  (declare (xargs :guard t :verify-guards nil))
+  (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b)))
 
-;; Caller frame after `return-from-function` has popped the gcd frame
-;; and pushed the result on top of the caller's operand stack.  Its
-;; instrs list was `(:call 0)` in `gcd-caller-frame-popped`; after
-;; return-from-function advances past the :call, instrs = nil.
-(defun gcd-caller-frame-final (a b)
+(defun gcd-spec-val (a b)
   (declare (xargs :guard (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
                   :verify-guards nil))
-  (make-frame :return-arity 1
-              :locals nil
-              :operand-stack (list (make-i32-val (acl2::nonneg-int-gcd a b)))
-              :instrs nil
-              :label-stack nil))
+  (make-i32-val (acl2::nonneg-int-gcd a b)))
 
-;; -- statep of the body-start state (needed for run-split) ------------------
-(local
- (defthm statep-of-body-start
-   (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
-            (statep (make-gcd-state a b
-                                    (list (gcd-caller-frame-popped))
-                                    *gcd-store*)))
-   :hints (("Goal" :in-theory (enable statep call-stackp framep
-                                      label-stackp operand-stackp
-                                      val-listp i32-valp u32p
-                                      funcinst-listp funcinstp
-                                      gcd-caller-frame-popped)))))
+(defun gcd-body-state (a b)
+  (declare (xargs :guard (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
+                  :verify-guards nil))
+  (make-gcd-state a b (list (wrap-popped-frame)) *gcd-store*))
 
-;; -- statep of call-state ---------------------------------------------------
-(local
- (defthm statep-of-call-state
-   (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
-            (statep (make-gcd-call-state a b)))
-   :hints (("Goal" :in-theory (enable statep call-stackp framep
-                                      label-stackp operand-stackp
-                                      val-listp i32-valp u32p
-                                      funcinst-listp funcinstp)))))
+(defun gcd-body-fuel-fn (a b)
+  (declare (xargs :guard t :verify-guards nil))
+  (gcd-total-fuel a b))
 
-;; -- statep after the body run ----------------------------------------------
-;; After gcd-total-fuel steps the state still has non-empty call-stack
-;; (by preservation) so it cannot be :done or :trap.
+;; --- Discharge the seven constraint theorems of the wrap book -------------
 
 (local
- (defthm statep-after-body
-   (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
-            (statep (run (gcd-total-fuel a b)
-                         (make-gcd-state a b
-                                         (list (gcd-caller-frame-popped))
-                                         *gcd-store*))))
+ (defthm gcd-funcinstp-of-the-func
+   (funcinstp (gcd-the-func))
+   :hints (("Goal" :in-theory (enable funcinstp)))))
+
+(local
+ (defthm gcd-input-ok-implies-u32
+   (implies (gcd-input-ok a b)
+            (and (unsigned-byte-p 32 a)
+                 (unsigned-byte-p 32 b)))
+   :rule-classes :forward-chaining))
+
+(local
+ (defthm gcd-i32-valp-of-spec-val
+   (implies (gcd-input-ok a b)
+            (i32-valp (gcd-spec-val a b)))
+   :hints (("Goal" :in-theory (enable i32-valp make-i32-val u32p)))))
+
+(local
+ (defthm gcd-natp-of-body-fuel
+   (implies (gcd-input-ok a b)
+            (natp (gcd-body-fuel-fn a b)))
+   :rule-classes :type-prescription))
+
+;; The call-enters-body constraint instantiates to exactly
+;; `gcd-func-call-enters-body`, once we expand `make-gcd-call-state` and
+;; `gcd-body-state`.
+(local
+ (defthm gcd-call-enters-body
+   (implies (gcd-input-ok a b)
+            (equal (run 1 (make-state
+                           :store (list (gcd-the-func))
+                           :call-stack (list (make-gcd-caller-frame a b))
+                           :memory nil :globals nil))
+                   (gcd-body-state a b)))
    :hints (("Goal"
-            :do-not-induct t
-            :do-not '(generalize fertilize)
-            :use ((:instance gcd-impl-correct-state
-                             (a a) (b b)
-                             (call-tail (list (gcd-caller-frame-popped)))
-                             (store *gcd-store*)))
-            :in-theory (disable gcd-impl-correct-state
-                                gcd-state-to-loop-entry
-                                gcd-total-fuel
-                                (:definition run)
-                                make-gcd-state)))))
+            :use ((:instance gcd-func-call-enters-body (a a) (b b)))
+            :in-theory (e/d (gcd-body-state) ; gcd-the-func unfolds via exec-counterpart
+                            (gcd-func-call-enters-body))))))
 
-(value-triple (cw " - statep lemmas for call-state / body-start / body-end (Q.E.D.)~%"))
-
-;; --- S2 → S3: one step of return-from-function at the body-end state -------
-;;
-;; We don't know the full shape of S2 (its locals/intermediate operand
-;; stack are whatever the last iteration produced), but we know all the
-;; projections `return-from-function` reads.  We therefore prove:
-;;   top-operand of S3's current-operand-stack = gcd
-;;   current-instrs of S3 = nil
-;;   current-label-stack of S3 = nil
-;;   call-stack of S3 = (list gcd-caller-frame-popped-with-instrs-popped)
-;; From these, the final step (S3 → :done) follows by direct execution.
-
-(defun gcd-body-end-state (a b)
-  ;; Abbreviation for the body-end state.
-  (declare (xargs :verify-guards nil))
-  (run (gcd-total-fuel a b)
-       (make-gcd-state a b (list (gcd-caller-frame-popped)) *gcd-store*)))
-
-;; Structural facts about the call-stack of S2 that we'll feed into
-;; `return-from-function`.  All come from gcd-impl-correct-state.
+;; statep-of-make-body-state: gcd-body-state is a statep.
 (local
- (defthm body-end-call-stack-structure
-   (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
-            (and (statep (gcd-body-end-state a b))
-                 (consp (state->call-stack (gcd-body-end-state a b)))
-                 (consp (cdr (state->call-stack (gcd-body-end-state a b))))
-                 (equal (cdr (state->call-stack (gcd-body-end-state a b)))
-                        (list (gcd-caller-frame-popped)))
+ (defthm gcd-statep-of-make-body-state
+   (implies (gcd-input-ok a b)
+            (statep (gcd-body-state a b)))
+   :hints (("Goal"
+            :use ((:instance statep-of-make-gcd-state
+                             (a a) (b b)
+                             (call-tail (list (wrap-popped-frame)))
+                             (store *gcd-store*)))
+            :in-theory (e/d (gcd-body-state call-stackp framep
+                                            label-stackp operand-stackp
+                                            funcinst-listp)
+                            (statep-of-make-gcd-state))))))
+
+;; body-shape-after-fuel: the 13-conjunct shape at the end of the body run.
+;; `gcd-impl-correct-state` states exactly this for arbitrary (call-tail,
+;; store); we specialize to (list (wrap-popped-frame)) and *gcd-store*.
+(local
+ (defthm gcd-body-shape-after-fuel
+   (implies (gcd-input-ok a b)
+            (and (not (consp (current-instrs
+                              (run (gcd-body-fuel-fn a b) (gcd-body-state a b)))))
+                 (not (consp (current-label-stack
+                              (run (gcd-body-fuel-fn a b) (gcd-body-state a b)))))
+                 (statep (run (gcd-body-fuel-fn a b) (gcd-body-state a b)))
+                 (equal (cdr (state->call-stack
+                              (run (gcd-body-fuel-fn a b) (gcd-body-state a b))))
+                        (list (wrap-popped-frame)))
                  (equal (frame->return-arity
-                         (car (state->call-stack (gcd-body-end-state a b))))
+                         (car (state->call-stack
+                               (run (gcd-body-fuel-fn a b) (gcd-body-state a b)))))
                         1)
-                 (equal (state->store (gcd-body-end-state a b))
-                        *gcd-store*)
-                 (not (consp (current-instrs (gcd-body-end-state a b))))
-                 (not (consp (current-label-stack (gcd-body-end-state a b))))
+                 (equal (state->store
+                         (run (gcd-body-fuel-fn a b) (gcd-body-state a b)))
+                        (list (gcd-the-func)))
+                 (consp (state->call-stack
+                         (run (gcd-body-fuel-fn a b) (gcd-body-state a b))))
                  (consp (frame->operand-stack
-                         (car (state->call-stack (gcd-body-end-state a b)))))
+                         (car (state->call-stack
+                               (run (gcd-body-fuel-fn a b) (gcd-body-state a b))))))
                  (<= 1 (operand-stack-height
                         (frame->operand-stack
-                         (car (state->call-stack (gcd-body-end-state a b))))))
-                 (equal (state->memory (gcd-body-end-state a b)) nil)
-                 (equal (state->globals (gcd-body-end-state a b)) nil)
-                 (equal (state->table (gcd-body-end-state a b)) nil)
+                         (car (state->call-stack
+                               (run (gcd-body-fuel-fn a b) (gcd-body-state a b)))))))
+                 (equal (state->memory
+                         (run (gcd-body-fuel-fn a b) (gcd-body-state a b)))
+                        nil)
+                 (equal (state->globals
+                         (run (gcd-body-fuel-fn a b) (gcd-body-state a b)))
+                        nil)
+                 (equal (state->table
+                         (run (gcd-body-fuel-fn a b) (gcd-body-state a b)))
+                        nil)
                  (equal (top-operand
-                         (current-operand-stack (gcd-body-end-state a b)))
-                        (make-i32-val (acl2::nonneg-int-gcd a b)))))
+                         (current-operand-stack
+                          (run (gcd-body-fuel-fn a b) (gcd-body-state a b))))
+                        (gcd-spec-val a b))))
    :hints (("Goal"
-            :do-not-induct t
             :use ((:instance gcd-impl-correct-state
                              (a a) (b b)
-                             (call-tail (list (gcd-caller-frame-popped)))
+                             (call-tail (list (wrap-popped-frame)))
                              (store *gcd-store*)))
-            :in-theory (e/d (gcd-body-end-state)
-                            (gcd-impl-correct-state
-                             gcd-state-to-loop-entry
-                             gcd-total-fuel
-                             (:definition run)
-                             make-gcd-state))))))
+            :in-theory (e/d (gcd-body-state gcd-body-fuel-fn)
+                            (gcd-impl-correct-state))))))
 
-;; Auxiliary alias: operand stack has height >= 1 at body end.  This
-;; follows directly from `body-end-call-stack-structure`, but
-;; `return-from-body-end` (below) references the two conjuncts by this
-;; name in its `:use` clause, so we keep the alias.
+(value-triple (cw " - wrap-book constraints discharged for gcd (Q.E.D.)~%"))
 
+;; --- Functionally instantiate `call-to-done` ------------------------------
+
+;; First, the raw instantiation.  We avoid enabling the gcd-specific
+;; witness defuns here so that the constraint-discharge rewrite rules
+;; (`gcd-*` above) match the substituted constraints unchanged.
 (local
- (defthm body-end-operand-stack-consp
-   (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
-            (and (consp (frame->operand-stack
-                         (car (state->call-stack (gcd-body-end-state a b)))))
-                 (<= 1 (operand-stack-height
-                        (frame->operand-stack
-                         (car (state->call-stack (gcd-body-end-state a b))))))))
-   :hints (("Goal"
-            :use ((:instance body-end-call-stack-structure (a a) (b b)))
-            :in-theory (disable body-end-call-stack-structure
-                                gcd-body-end-state
-                                (:definition run))))))
-
-;; From these projections, we characterize `return-from-function` applied
-;; to the body-end state.  The resulting state has:
-;;   - call-stack = (list gcd-caller-frame-final)
-;;   - store = *gcd-store*
-;; so that a subsequent step immediately produces (:done ...).
-
-(local
- (defthm return-from-body-end
-   (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
-            (equal (return-from-function (gcd-body-end-state a b))
-                   (make-state
-                    :store *gcd-store*
-                    :call-stack (list (gcd-caller-frame-final a b))
-                    :memory nil :globals nil)))
-   :hints (("Goal"
-            :do-not-induct t
-            :do-not '(generalize fertilize)
-            :use ((:instance body-end-call-stack-structure (a a) (b b))
-                  (:instance body-end-operand-stack-consp (a a) (b b)))
-            :expand ((:free (stack)
-                      (top-n-operands 1 stack nil))
-                     (:free (stack acc)
-                      (top-n-operands 0 stack acc))
-                     (:free (v rest stack)
-                      (push-vals (cons v rest) stack))
-                     (:free (stack)
-                      (push-vals nil stack)))
-            :in-theory (e/d (return-from-function
-                             pop-call-stack push-call-stack push-vals
-                             top-n-operands top-operand push-operand
-                             pop-operand
-                             operand-stack-height
-                             current-frame current-instrs current-operand-stack
-                             current-label-stack top-frame
-                             update-current-operand-stack
-                             update-current-instrs
-                             gcd-caller-frame-final
-                             gcd-caller-frame-popped)
-                            (body-end-call-stack-structure
-                             body-end-operand-stack-consp
-                             gcd-body-end-state
-                             (:definition run)
-                             make-gcd-state))))))
-
-(value-triple (cw " - return-from-body-end: S2 -> S3 via return-from-function (Q.E.D.)~%"))
-
-;; --- S3 → :done.  One more step, which calls return-from-function on a
-;; single-frame call-stack with empty instrs/labels.
-
-(local
- (defthm run-1-from-after-return
-   (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
-            (equal (run 1
+ (defthm gcd-func-correct-raw
+   (implies (and (gcd-input-ok a b)
+                 (framep (make-gcd-caller-frame a b)))
+            (equal (run (+ 3 (gcd-body-fuel-fn a b))
                         (make-state
-                         :store *gcd-store*
-                         :call-stack (list (gcd-caller-frame-final a b))
+                         :store (list (gcd-the-func))
+                         :call-stack (list (make-gcd-caller-frame a b))
                          :memory nil :globals nil))
                    `(:done ,(make-state
-                             :store *gcd-store*
-                             :call-stack (list (gcd-caller-frame-final a b))
+                             :store (list (gcd-the-func))
+                             :call-stack (list (make-frame
+                                                :return-arity 1
+                                                :locals nil
+                                                :operand-stack (list (gcd-spec-val a b))
+                                                :instrs nil
+                                                :label-stack nil))
                              :memory nil :globals nil))))
    :hints (("Goal"
-            :in-theory (e/d (return-from-function
-                             current-instrs current-label-stack
-                             current-frame top-frame
-                             state->call-stack
-                             frame->instrs frame->label-stack
-                             frame->operand-stack
-                             gcd-caller-frame-final)
-                            nil)
-            :expand ((:free (s) (run 1 s)))))))
-
-(value-triple (cw " - run-1-from-after-return: S3 -> :done (Q.E.D.)~%"))
+            :use ((:functional-instance
+                   call-to-done
+                   (the-func gcd-the-func)
+                   (input-ok gcd-input-ok)
+                   (spec-val gcd-spec-val)
+                   (make-call-frame make-gcd-caller-frame)
+                   (make-body-state gcd-body-state)
+                   (body-fuel gcd-body-fuel-fn)))
+            :in-theory (e/d ()
+                                (gcd-body-state
+                                 gcd-body-fuel-fn
+                                 gcd-input-ok
+                                 gcd-spec-val
+                                 gcd-the-func
+                                 (:executable-counterpart gcd-the-func)
+                                 wrap-popped-frame
+                                 wrap-final-frame
+                                 make-gcd-caller-frame
+                                 make-gcd-state
+                                 current-label-stack
+                                 current-instrs
+                                 current-operand-stack
+                                 current-frame
+                                 top-frame))))))
 
 (local
- (defthm not-equal-done-car-when-statep
-   (implies (statep x)
-            (not (equal :done (car x))))
-   :hints (("Goal"
-            :use ((:instance not-statep-of-done (x (cdr x))))
-            :in-theory (disable not-statep-of-done)))))
-
-(local
- (defthm framep-of-gcd-caller-frame-final
+ (defthm framep-of-make-gcd-caller-frame
    (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
-            (framep (gcd-caller-frame-final a b)))
-   :hints (("Goal" :in-theory (enable framep label-stackp
-                                      operand-stackp val-listp
-                                      valp i32-valp u32p
-                                      make-i32-val
-                                      gcd-caller-frame-final)))))
+            (framep (make-gcd-caller-frame a b)))
+   :hints (("Goal" :in-theory (enable framep label-stackp operand-stackp
+                                      val-listp valp i32-valp u32p
+                                      make-i32-val)))))
 
-(local
- (defthm statep-of-return-from-body-end
-   (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
-            (statep (return-from-function (gcd-body-end-state a b))))
-   :hints (("Goal"
-            :do-not-induct t
-            :use ((:instance return-from-body-end (a a) (b b)))
-            :in-theory (e/d (call-stackp framep label-stackp
-                                         operand-stackp val-listp
-                                         valp i32-valp u32p
-                                         make-i32-val
-                                         gcd-caller-frame-final)
-                            (gcd-body-end-state))))))
-
-;; --- Chain: S2 (= run gcd-total-fuel body-start) → :done via 2 more steps.
-
-(local
- (defthm run-2-from-body-end
-   (implies (and (unsigned-byte-p 32 a) (unsigned-byte-p 32 b))
-            (equal (run 2 (gcd-body-end-state a b))
-                   `(:done ,(make-state
-                             :store *gcd-store*
-                             :call-stack (list (gcd-caller-frame-final a b))
-                             :memory nil :globals nil))))
-   :hints (("Goal"
-            :do-not-induct t
-            :do-not '(generalize fertilize)
-            :use ((:instance body-end-call-stack-structure (a a) (b b))
-                  (:instance return-from-body-end (a a) (b b))
-                  (:instance run-1-from-after-return (a a) (b b))
-                  (:instance statep-of-return-from-body-end (a a) (b b)))
-            :expand ((:free (s) (run 2 s))
-                     (:free (s) (run 1 s)))
-            :in-theory (e/d (current-instrs current-label-stack)
-                            (body-end-call-stack-structure
-                             return-from-body-end
-                             run-1-from-after-return
-                             statep-of-return-from-body-end
-                             gcd-body-end-state
-                             gcd-caller-frame-final))))))
-
-(value-triple (cw " - run-2-from-body-end: 2 final steps land in :done (Q.E.D.)~%"))
-
-;; --- Chain: call-state → body-start (1 step) → body-end (gcd-total-fuel)
-;; → :done (2 steps).  All glued with run-split-when-statep.
-
+;; Second, unfold the gcd-specific witnesses to get the user-facing form.
 (defthm gcd-func-correct
   (implies (and (unsigned-byte-p 32 a)
                 (unsigned-byte-p 32 b))
-           (equal (run (gcd-func-total-fuel a b)
-                       (make-gcd-call-state a b))
+           (equal (run (+ 3 (gcd-total-fuel a b)) (make-gcd-call-state a b))
                   `(:done ,(make-state
                             :store *gcd-store*
-                            :call-stack (list (gcd-caller-frame-final a b))
+                            :call-stack (list (make-frame
+                                               :return-arity 1
+                                               :locals nil
+                                               :operand-stack
+                                               (list (make-i32-val
+                                                      (acl2::nonneg-int-gcd a b)))
+                                               :instrs nil
+                                               :label-stack nil))
                             :memory nil :globals nil))))
   :hints (("Goal"
-           :do-not-induct t
-           :do-not '(generalize fertilize)
-           :use ((:instance gcd-func-call-enters-body (a a) (b b))
-                 (:instance statep-of-call-state (a a) (b b))
-                 (:instance statep-of-body-start (a a) (b b))
-                 (:instance statep-after-body (a a) (b b))
-                 (:instance run-2-from-body-end (a a) (b b))
-                 (:instance run-split-when-statep
-                            (m 1)
-                            (n (+ 2 (gcd-total-fuel a b)))
-                            (state (make-gcd-call-state a b)))
-                 (:instance run-split-when-statep
-                            (m (gcd-total-fuel a b))
-                            (n 2)
-                            (state (make-gcd-state a b
-                                                   (list (gcd-caller-frame-popped))
-                                                   *gcd-store*))))
-           :in-theory (e/d (gcd-func-total-fuel
-                            gcd-body-end-state)
-                           (gcd-func-call-enters-body
-                            statep-of-call-state
-                            statep-of-body-start
-                            statep-after-body
-                            run-2-from-body-end
-                            run-split-when-statep
-                            make-gcd-call-state
-                            make-gcd-state
+           :use ((:instance gcd-func-correct-raw (a a) (b b))
+                 (:instance framep-of-make-gcd-caller-frame (a a) (b b)))
+           :in-theory (e/d (gcd-input-ok
+                            gcd-the-func
+                            gcd-spec-val
+                            gcd-body-fuel-fn
+                            make-gcd-call-state)
+                           (gcd-func-correct-raw
+                            framep-of-make-gcd-caller-frame
+                            make-gcd-caller-frame
                             (:definition run))))))
 
 (value-triple (cw " - gcd-func-correct: full :call-to-:done trace (Q.E.D.)~%"))
 
-;; --- User-facing corollary: extraction via `gcd-done-result` ---------------
-
-(defthm gcd-func-correct-result
-  (implies (and (unsigned-byte-p 32 a)
-                (unsigned-byte-p 32 b))
-           (equal (gcd-done-result
-                   (run (gcd-func-total-fuel a b)
-                        (make-gcd-call-state a b)))
-                  (make-i32-val (acl2::nonneg-int-gcd a b))))
-  :hints (("Goal"
-           :do-not-induct t
-           :use ((:instance gcd-func-correct (a a) (b b)))
-           :in-theory (e/d (gcd-done-result
-                            gcd-caller-frame-final
-                            top-operand
-                            state->call-stack frame->operand-stack)
-                           (gcd-func-correct
-                            (:definition run))))))
-
-(value-triple (cw "~%====================================================~%"))
-(value-triple (cw " *GCD-FUNC* PROVED CORRECT starting from :call state.~%"))
-(value-triple (cw "====================================================~%"))
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; 9. Fuel-free partial-correctness wrapper.
+;; §5. Fuel-free partial-correctness wrapper.
 ;;
-;; The theorems above are stated with a concrete fuel value
-;; `gcd-func-total-fuel a b`.  For an end-user-facing statement it's
-;; cleaner to say "there exists some fuel for which the run reaches
-;; :done with the expected value".  `defun-sk` packages that existential
-;; once, and the two witness lemmas below discharge it using the fuel
-;; we already know works.
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; A `defun-sk` existential over the fuel, satisfied by witnessing with
+;; `(+ 3 (gcd-total-fuel a b))` via `gcd-func-correct`.
 
 (defun-sk gcd-halts-with (a b v)
   (exists fuel
@@ -1139,7 +987,12 @@
          (equal (run fuel (make-gcd-call-state a b))
                 `(:done ,(make-state
                           :store *gcd-store*
-                          :call-stack (list (gcd-caller-frame-final a b))
+                          :call-stack (list (make-frame
+                                             :return-arity 1
+                                             :locals nil
+                                             :operand-stack (list v)
+                                             :instrs nil
+                                             :label-stack nil))
                           :memory nil :globals nil)))
          (equal v (make-i32-val (acl2::nonneg-int-gcd a b))))))
 
@@ -1150,7 +1003,7 @@
                            (make-i32-val (acl2::nonneg-int-gcd a b))))
   :hints (("Goal"
            :use ((:instance gcd-halts-with-suff
-                            (fuel (gcd-func-total-fuel a b))
+                            (fuel (+ 3 (gcd-total-fuel a b)))
                             (a a) (b b)
                             (v (make-i32-val (acl2::nonneg-int-gcd a b))))
                  (:instance gcd-func-correct (a a) (b b)))
@@ -1158,9 +1011,7 @@
                            (gcd-halts-with
                             gcd-halts-with-suff
                             gcd-func-correct
-                            gcd-func-total-fuel
                             make-gcd-call-state
-                            gcd-caller-frame-final
                             (:definition run))))))
 
 (value-triple (cw " - gcd-func-halts: fuel-free existential statement (Q.E.D.)~%"))
@@ -1168,6 +1019,3 @@
 (value-triple (cw "~%====================================================~%"))
 (value-triple (cw " FUEL-FREE WRAPPER: gcd-halts-with established.~%"))
 (value-triple (cw "====================================================~%"))
-
-
-
