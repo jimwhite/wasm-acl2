@@ -768,17 +768,11 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Linear memory (M4)
 
-;; Memory is a list of bytes (unsigned-byte-p 8)
-(defun bytep (x)
-  (declare (xargs :guard t))
-  (unsigned-byte-p 8 x))
-
-(defun byte-listp (x)
-  (declare (xargs :guard t))
-  (if (not (consp x))
-      (null x)
-    (and (bytep (first x))
-         (byte-listp (rest x)))))
+;; Memory is a list of bytes (unsigned-byte-p 8).
+;; Use the standard Kestrel/ACL2 definitions so our model interoperates with
+;; `kestrel/wasm/parse-binary` (which also consumes byte lists). These are
+;; logically equivalent to what we had locally.
+(include-book "kestrel/bv-lists/byte-listp" :dir :system)
 
 ;; WASM page size is 64KiB
 (defconst *page-size* 65536)
