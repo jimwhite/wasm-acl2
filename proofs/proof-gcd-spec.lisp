@@ -1111,5 +1111,52 @@
 (value-triple (cw " *GCD-FUNC* PROVED CORRECT starting from :call state.~%"))
 (value-triple (cw "====================================================~%"))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 9. Fuel-free partial-correctness wrapper.
+;;
+;; The theorems above are stated with a concrete fuel value
+;; `gcd-func-total-fuel a b`.  For an end-user-facing statement it's
+;; cleaner to say "there exists some fuel for which the run reaches
+;; :done with the expected value".  `defun-sk` packages that existential
+;; once, and the two witness lemmas below discharge it using the fuel
+;; we already know works.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun-sk gcd-halts-with (a b v)
+  (exists fuel
+    (and (natp fuel)
+         (equal (run fuel (make-gcd-call-state a b))
+                `(:done ,(make-state
+                          :store *gcd-store*
+                          :call-stack (list (gcd-caller-frame-final a b))
+                          :memory nil :globals nil)))
+         (equal v (make-i32-val (acl2::nonneg-int-gcd a b))))))
+
+(defthm gcd-func-halts
+  (implies (and (unsigned-byte-p 32 a)
+                (unsigned-byte-p 32 b))
+           (gcd-halts-with a b
+                           (make-i32-val (acl2::nonneg-int-gcd a b))))
+  :hints (("Goal"
+           :use ((:instance gcd-halts-with-suff
+                            (fuel (gcd-func-total-fuel a b))
+                            (a a) (b b)
+                            (v (make-i32-val (acl2::nonneg-int-gcd a b))))
+                 (:instance gcd-func-correct (a a) (b b)))
+           :in-theory (e/d ()
+                           (gcd-halts-with
+                            gcd-halts-with-suff
+                            gcd-func-correct
+                            gcd-func-total-fuel
+                            make-gcd-call-state
+                            gcd-caller-frame-final
+                            (:definition run))))))
+
+(value-triple (cw " - gcd-func-halts: fuel-free existential statement (Q.E.D.)~%"))
+
+(value-triple (cw "~%====================================================~%"))
+(value-triple (cw " FUEL-FREE WRAPPER: gcd-halts-with established.~%"))
+(value-triple (cw "====================================================~%"))
+
 
 
