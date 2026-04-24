@@ -902,3 +902,98 @@ stalls:
   `reachable-preserved-by-mstep`, `measure-decreases-on-mstep`,
   `o-p-of-state-measure`, `mstep-is-run :rule-classes nil`, and
   `mstep-statep-or-terminalp :rule-classes nil`.
+
+## Appendix C — Round 1 factorial proof (validates the recipe)
+
+As a second exercise of the Appendix A recipe (minus the call-wrap lift,
+deferred to a later round), [proofs/proof-factorial-spec.lisp](proof-factorial-spec.lisp)
+proves the iterative i32 factorial in
+[tests/oracle/factorial.wat](../tests/oracle/factorial.wat) correct.
+
+### C.1 What was proved
+
+```lisp
+(defthm fac-impl-correct
+  (implies (and (unsigned-byte-p 32 n)
+                (call-stackp call-tail)
+                (storep store))
+           (equal (top-operand
+                   (current-operand-stack
+                    (run (fac-total-fuel n) (make-fac-state n call-tail store))))
+                  (make-i32-val (fac-spec n)))))
+
+(defthm fac-impl-correct-bounded
+  (implies (and (natp n) (<= n 12)
+                (call-stackp call-tail) (storep store))
+           (equal (top-operand
+                   (current-operand-stack
+                    (run (fac-total-fuel n) (make-fac-state n call-tail store))))
+                  (make-i32-val (acl2::factorial n)))))
+```
+
+The bv spec `fac-spec` is defined via `acl2::bvmult 32`; for `n <= 12`
+it coincides with the unbounded `acl2::factorial` from
+`arithmetic/factorial`, giving the user-facing mathematical form.
+
+Lines of proof: 433 (vs. 1021 for GCD including §4 call-wrap lift and
+§5 `defun-sk`). The GCD call-wrap recipe from Appendix A applies
+unchanged to factorial but is deferred to keep Round 1 focused.
+
+### C.2 Symbolic-execution step counts match GCD exactly
+
+| Edge | Steps | GCD | factorial |
+|---|---|---|---|
+| prefix → loop-entry | 2 vs 4 | `(:block)(:loop)` | `(:i32.const 1)(:local.set 1)(:block)(:loop)` |
+| one iteration      | 13  | 12 body instrs + `(:br 0)` re-enters loop | same count — different ops |
+| exit (b=0 / n=0)   | 4   | eqz / br_if / to-continuation / `(:local.get 0)` | eqz / br_if / to-continuation / `(:local.get 1)` |
+
+The `run-plus-at-loop-entry` rewrite rule and `gcd-loop-ind` induction
+scheme pattern are essentially word-for-word reusable; only the state
+builder and the post-iteration arguments (`bvminus 32 n 1`, `bvmult 32
+acc n`) differ from `(b, (mod a b), b)`.
+
+### C.3 Small arithmetic bridges added to `wasm-arith-utils.lisp`
+
+```lisp
+(defthm bvminus-32-of-u32-and-1
+  (implies (and (unsigned-byte-p 32 n) (not (equal n 0)))
+           (equal (acl2::bvminus 32 n 1) (- n 1))))
+(defthm u32p-of-bvmult-32  (unsigned-byte-p 32 (acl2::bvmult 32 a b)))
+(defthm u32p-of-bvminus-32 (unsigned-byte-p 32 (acl2::bvminus 32 a b)))
+(defthm bvmult-32-of-1      (implies (u32p a) (equal (bvmult 32 1 a) a)))
+(defthm bvmult-32-of-1-left (implies (u32p a) (equal (bvmult 32 a 1) a)))
+```
+
+`bvminus-32-of-u32-and-1` is the key lemma for the step-case induction:
+it lets the post-iteration state `(make-loop-entry (bvminus 32 n 1) ...)`
+match the IH, whose first arg is `(- n 1)` (from the hand-written
+`fac-loop-ind`).
+
+### C.4 Bounded corollary: when bv-factorial = mathematical factorial
+
+`(fac-spec n) = (acl2::factorial n)` for `n <= 12` but not in general.
+Two small lemmas suffice:
+
+1. `u32p-of-factorial-bounded`: proved by **explicit case split** on
+   `n ∈ {0,...,12}`, not induction. The inductive proof fails because
+   the natural IH `(factorial(n-1) <= 2^32)` is too weak to conclude
+   `n * factorial(n-1) <= 2^32` without also knowing
+   `factorial(n-1) <= 39916800 = 11!`. A 13-case split closes it
+   immediately via the executable counterpart of `factorial`.
+2. `fac-spec-when-small`: induct on `fac-spec`; step case uses
+   `u32p-of-factorial-bounded` so that `bvmult 32 n x = n * x`.
+
+### C.5 What this confirms for the cross-implementation plan
+
+- The Appendix A recipe is genuinely reusable across iterative WASM
+  loops: changing the transition function, step count per iteration,
+  and local layout is straightforward; the induction scheme and
+  run-plus rewrite adapt cleanly.
+- The 13-step per-iteration count is coincidence between GCD and
+  factorial, not a fundamental invariant. It depends on loop body
+  length. For `fac-rec` (recursive via `(call $fac)`) or `fac-opt`,
+  per-iteration counts and state shape will differ.
+- APT `tailrec` was not needed. `fac-loop-entry-correct` closes in
+  one induction with the GCD-style hand scheme. Round 2 (proving
+  `fac-iter-named` or `fac-opt` against the same spec) will be the
+  genuine A/B test for APT's value in this codebase.
