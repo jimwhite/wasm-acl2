@@ -34,20 +34,54 @@
   :rule-classes :linear
   :enable (c::sint-max c::int-bits))
 
+;; Same story for scan$loop's return-type rule: defrulel'd in wasm-vm1.lisp,
+;; so re-declare non-locally for the :block arm's guard proof (which calls
+;; |scan_end|, which unfolds into mv-nth 0 of |scan$loop|).
+(defrule sintp-of-mv-nth-0-scan$loop-for-codegen
+  (implies (and (c::sintp |pc|)
+                (c::sintp |depth|)
+                (c::sintp |fuel|)
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (<= 0 (c::integer-from-sint |depth|))
+                (<= (c::integer-from-sint |depth|) 4096)
+                (<= 0 (c::integer-from-sint |fuel|))
+                (<= (c::integer-from-sint |fuel|) 4096))
+           (c::sintp (mv-nth 0 (|scan$loop| |pc| |depth| |fuel|
+                                            |wasm_buf|))))
+  :induct (|scan$loop| |pc| |depth| |fuel| |wasm_buf|)
+  :enable (|scan$loop|
+           c::add-sint-sint
+           c::sub-sint-sint
+           c::gt-sint-sint
+           c::lt-sint-sint
+           c::eq-sint-sint
+           c::boolean-from-sint
+           c::sint-from-boolean
+           c::sint-integerp-alt-def
+           c::declar
+           c::assign
+           c::condexpr))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Generate the dispatcher.  Same 8-opcode table as loop-demo.lisp; bodies
 ;; are spliced in by the template-family emitters in loop.lisp.
 
 (gen-exec-loop
   |exec_loop_gen|
-  (:end-toplevel    #x0b)
-  (:drop            #x1a)
+  (:end              #x0b)
+  (:drop             #x1a)
   (:local-idx-pusher #x20)
   (:local-idx-popper #x21)
   (:local-idx-teer   #x22)
   (:i32-const        #x41)                       ; u8 immediate (simplified)
+  (:i32-unop-eqz     #x45)                       ; i32.eqz
   (:i32-binop-total  #x6a c::add-uint-uint)      ; i32.add
-  (:i32-binop-nz     #x70 c::rem-uint-uint))     ; i32.rem_u
+  (:i32-binop-nz     #x70 c::rem-uint-uint)      ; i32.rem_u
+  (:block            #x02)                       ; block BT
+  (:loop-begin       #x03)                       ; loop BT
+  (:br               #x0c)                       ; br L
+  (:br-if            #x0d))                      ; br_if L
 
 ;; Needed so `|run_wasm_gen|'s guard proof can see that the loop preserves
 ;; `struct-|wst|-p'.  Mirrors `struct-wst-p-of-mv-nth-0-exec$loop' in
@@ -123,6 +157,8 @@
         |check_magic|
         |parse$loop|
         |parse_module|
+        |scan$loop|
+        |scan_end|
         |exec_loop_gen|
         |run_wasm_gen|
         :file-name "run"

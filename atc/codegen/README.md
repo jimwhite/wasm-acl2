@@ -16,34 +16,73 @@ No new DSL. No edits to `execution.lisp`.
 
 ## Status
 
-Today: seven operations generated end-to-end, six template shapes,
-plus a generated opcode-dispatch loop wired to the hand-written
-`.wasm` parser and driven by `wat2wasm`-compiled WebAssembly.
+Today: **thirteen opcodes** generated end-to-end through a shared template
+family of nine shapes, wired to the hand-written `.wasm` parser, driven by
+real `wat2wasm`-compiled WebAssembly. Straight-line *and* branching
+programs run through the same dispatch loop.
 
-**Running example** (see [End-to-end](#end-to-end-running-a-real-wasm-through-the-generated-loop) below):
+**Running examples** (see [End-to-end](#end-to-end-running-a-real-wasm-through-the-generated-loop) below):
 
 ```
 $ wat2wasm addmod.wat -o addmod.wasm
-$ ./run_demo addmod.wasm addmod 30 10   → 40   (= (30+10) %% 50)
-$ ./run_demo addmod.wasm addmod 49 49   → 48   (= 98 %% 50)
+$ ./run_demo addmod.wasm addmod 30 10         → 40    (= (30+10) %% 50)
+$ ./run_demo addmod.wasm addmod 49 49         → 48    (= 98 %% 50)
+
+$ ./run_demo ../../tests/oracle/gcd.wasm gcd 48 18            → 6
+$ ./run_demo ../../tests/oracle/gcd.wasm gcd 100 25           → 25
+$ ./run_demo ../../tests/oracle/gcd.wasm gcd 17 13            → 1
+$ ./run_demo ../../tests/oracle/gcd.wasm gcd 1000000 999983   → 1
 ```
 
+All gcd results match the hand-written reference (`../wasm-vm1` binary).
 
-| Spec                      | Shape                         | Generated ACL2        | Generated C         |
-|---------------------------|-------------------------------|-----------------------|---------------------|
-| `wasm::execute-local.get` | `:local-idx-pusher`           | `|exec_local_get|`    | `exec_local_get`    |
-| `wasm::execute-local.set` | `:local-idx-popper`           | `|exec_local_set|`    | `exec_local_set`    |
-| `wasm::execute-local.tee` | `:local-idx-teer`             | `|exec_local_tee|`    | `exec_local_tee`    |
-| `wasm::execute-drop`      | `:drop`                       | `|exec_drop|`         | `exec_drop`         |
-| `wasm::execute-i32.const` | `:i32-const`                  | `|exec_i32_const|`    | `exec_i32_const`    |
-| `wasm::execute-i32.add`   | `:i32-binop-total` + uint-op  | `|exec_i32_add|`      | `exec_i32_add`      |
-| `wasm::execute-i32.rem_u` | `:i32-binop-nz` + uint-op     | `|exec_i32_rem_u|`    | `exec_i32_rem_u`    |
+### Template shapes and opcodes covered
 
-The `:i32-binop-total` shape is parameterized by the ATC uint
-operator and so covers `add`/`sub`/`mul`/`and`/`or`/`xor` with a
-single additional line each. The `:i32-binop-nz` shape hoists the
-divisor-nonzero trap into the ACL2 guard (via the op's `-okp`
-predicate) and covers `div_u`/`rem_u` in one line each.
+| Spec / opcode                         | Shape                         | Notes                                            |
+|---------------------------------------|-------------------------------|--------------------------------------------------|
+| `wasm::execute-local.get` `0x20`      | `:local-idx-pusher`           | `|exec_local_get|`                               |
+| `wasm::execute-local.set` `0x21`      | `:local-idx-popper`           | `|exec_local_set|`                               |
+| `wasm::execute-local.tee` `0x22`      | `:local-idx-teer`             | `|exec_local_tee|`                               |
+| `wasm::execute-drop` `0x1a`           | `:drop`                       |                                                  |
+| `wasm::execute-i32.const` `0x41`      | `:i32-const`                  | one-byte immediate (not full LEB128)             |
+| `wasm::execute-i32.add` `0x6a`        | `:i32-binop-total` + uint-op  | shared with sub/mul/and/or/xor                   |
+| `wasm::execute-i32.rem_u` `0x70`      | `:i32-binop-nz` + uint-op     | shared with div_u; traps-to-halt on zero         |
+| `wasm::execute-i32.eqz` `0x45`        | `:i32-unop-eqz`               | peek-and-replace                                 |
+| `wasm::execute-block` `0x02`          | `:block`                      | pushes label w/ target = `scan_end(pc+2)`        |
+| `wasm::execute-loop` `0x03`           | `:loop-begin`                 | pushes label w/ target = loop start              |
+| `wasm::execute-end` `0x0b`            | `:end` or `:end-toplevel`     | `:end` pops a label (non-toplevel); toplevel halts |
+| `wasm::execute-br` `0x0c`             | `:br`                         | unconditional branch by depth                    |
+| `wasm::execute-br_if` `0x0d`          | `:br-if`                      | conditional branch (shares emitter w/ `:br`)     |
+
+The `:i32-binop-total` shape is parameterized by the ATC uint operator and
+covers `add`/`sub`/`mul`/`and`/`or`/`xor` at one line each. `:i32-binop-nz`
+hoists the divisor-nonzero trap into the ACL2 guard and covers `div_u`/
+`rem_u` similarly. `:br` and `:br-if` share one emitter (`emit-arm-br`)
+parameterized by an `is-conditional` flag — the only difference is three
+extra bindings for the stack-top check, spliced in conditionally so the
+translated C for `:br` has no dead code (ATC's ignore-formal rule).
+
+### `:end` vs `:end-toplevel`
+
+`:end-toplevel` (used by [loop-demo.lisp](loop-demo.lisp) / [demo.lisp](demo.lisp))
+treats every `0x0b` as the function end and halts. That is fine for
+straight-line programs whose label stack is always empty.
+
+`:end` (used by [integration-demo.lisp](integration-demo.lisp)) is the
+real semantics: if the label stack is non-empty, pop a label and fall
+through; otherwise halt. Programs that use `block` / `loop` / `br` must
+use `:end`, because every one of those constructs closes with a `0x0b`
+that does *not* mean "function return".
+
+### Guard-hint conditioning
+
+The loop generator detects whether the opcode table includes any of
+`:block` / `:loop-begin` / `:br` / `:br-if` (via `entries-have-control-flow-p`)
+and only then splices the `STRUCT-wst-lpc/lsp/lkind-INDEX-OKP` and
+`scan_end` rules into the generated guard hints. That way the control-flow-
+free `loop-demo.lisp` still certifies against a `|wst|` defstruct that has
+no `lpc`/`lsp`/`lkind` slots, while `integration-demo.lisp` picks up the
+richer struct from `../wasm-vm1.lisp` and gets the extra enables it needs.
 
 ### Execution loop
 
@@ -56,8 +95,8 @@ the caller's state) but every arm body is emitted from the same
 per-shape template that drives the standalone generator — one
 source of truth per shape.
 
-The 8-op demo (end, drop, local.get/set/tee, i32.const, i32.add,
-i32.rem_u) is driven by this table:
+The 8-op straight-line demo (end, drop, local.get/set/tee, i32.const,
+i32.add, i32.rem_u) is driven by this table:
 
 ```lisp
 (gen-exec-loop
@@ -72,12 +111,22 @@ i32.rem_u) is driven by this table:
   (:i32-binop-nz     #x70 c::rem-uint-uint))  ; i32.rem_u
 ```
 
-and produces [loop-demo.c](loop-demo.c) containing a single
-`exec_run(struct wst *st, int pc)` C function that initializes
-`sp/nl/halted/fuel` and drives a `while (halted == 0 && fuel > 0
-&& pc < 59998)` dispatch. Compare to the ~650 hand-written lines
-covering this same set in [`../wasm-vm1.lisp`](../wasm-vm1.lisp)
-`|exec$loop|`.
+The full 13-op control-flow table, used by
+[integration-demo.lisp](integration-demo.lisp) for gcd, adds:
+
+```lisp
+  (:end              #x0b)   ; pops a label if any, else halts
+  (:i32-unop-eqz     #x45)
+  (:block            #x02)
+  (:loop-begin       #x03)
+  (:br               #x0c)
+  (:br-if            #x0d)
+```
+
+and produces [loop-demo.c](loop-demo.c) (8-op) or [run.c](run.c) (13-op)
+each containing a single dispatch C function. Compare to the ~1100
+hand-written lines covering this same set in
+[`../wasm-vm1.lisp`](../wasm-vm1.lisp) `|exec$loop|`.
 
 Shape of the generated dispatcher (excerpt):
 
@@ -213,11 +262,17 @@ $ ./run_demo addmod.wasm addmod 100 50   # (100+50) %% 50 = 0
 0
 $ ./run_demo addmod.wasm addmod 49 49    # (98) %% 50 = 48
 48
+
+$ ./run_demo ../../tests/oracle/gcd.wasm gcd 48 18
+6
+$ ./run_demo ../../tests/oracle/gcd.wasm gcd 1000000 999983
+1
 ```
 
-[addmod.wat](addmod.wat) is a straight-line example using exactly the 8
-opcodes the current generator covers (`local.get`, `i32.add`,
-`i32.const`, `i32.rem_u`, `end`). `wat2wasm` is available at
+[addmod.wat](addmod.wat) is a straight-line example using only the 8
+straight-line opcodes. The `gcd.wasm` fixture exercises the full 13-op
+vocabulary — `block` / `loop` / `br` / `br_if` / `i32.eqz` — through the
+same generated dispatch loop. `wat2wasm` is available at
 `tools/node_modules/.bin/wat2wasm`.
 
 Two additional drivers exist for regression / isolation work:
@@ -353,6 +408,56 @@ person — or the next shape — doesn't re-trip them.
     function that is already declared elsewhere as long as its
     body matches; listing it twice (here and in the upstream
     wasm-vm1 `c::atc`) is fine.
+
+11. **`sint-from-boolean` must wrap an AND or OR, not a single
+    call.** ATC only recognises `(sint-from-boolean e)` if `e` is a
+    (transformed) call of `AND` or `OR` over `boolean-from-sint`
+    terms; a single `(boolean-from-sint (c::eq-… x y))` is rejected
+    as "not a (transformed) call of AND or OR." Workaround used in
+    both `:i32-unop-eqz` and `:br-if`: write `(or x x)` over the
+    same boolean to satisfy the shape check.
+
+12. **ATC ignore-formal rule applies inside generated `let*`.** If
+    an emitter sometimes needs auxiliary bindings
+    (`|peek_idx|` / `|peek_v|` / `|cond_true|` for `:br-if` but not
+    `:br`), those bindings must be introduced **conditionally** in
+    the backquote template — otherwise the unused-variable check
+    fires during ATC translation for the variant that doesn't use
+    them. Pattern used in [loop.lisp](loop.lisp) `emit-arm-br`:
+
+    ```lisp
+    ,@(and is-conditional
+           '((|peek_idx| …) (|peek_v| …) (|cond_true| …)))
+    ```
+
+13. **Reused shapes with host-provided support must gate their
+    guard-hints.** When the same generator (`emit-exec-loop`) is
+    reused by both a standalone demo (no `|lpc|` / `|lsp|` slots)
+    and an integration demo (with them), the guard-hints must
+    conditionally reference the control-flow struct rules.
+    [loop.lisp](loop.lisp) uses `entries-have-control-flow-p` to
+    splice `STRUCT-wst-lpc/lsp/lkind-INDEX-OKP` and `|scan_end|`
+    only when the opcode table actually includes `:block` / `:br`
+    / `:br-if`.
+
+14. **Non-local return-type lemmas are needed for host helpers.**
+    `../wasm-vm1.lisp` declares `sintp-of-mv-nth-0-scan$loop` with
+    `defrulel` (local to that book). The `:block` arm in the
+    generated loop calls `|scan_end|`, which unfolds into
+    `mv-nth 0` of `|scan$loop|`, and that needs to be an `sintp`
+    for guard verification.
+    [integration-demo.lisp](integration-demo.lisp) re-declares the
+    rule non-locally (as `sintp-of-mv-nth-0-scan$loop-for-codegen`)
+    alongside the `sint-max->=-65600-for-codegen` rule. Same
+    pattern applies whenever a generated arm calls an externally-
+    defined helper.
+
+15. **Watch for `pc`/`sp` variable confusion in arm templates.**
+    The `:br` arm's new stack pointer is `|tsp_raw|` (the target
+    SP read from the label), not `|tpc_raw|` (the target PC). Easy
+    to mistype in backquote-heavy template code; the guard failure
+    presents as a stack-bound checkpoint `(… <= 64)` that seems
+    unrelated to the typo.
 
 ## Adding a new shape
 

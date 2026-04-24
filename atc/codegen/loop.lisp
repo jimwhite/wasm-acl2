@@ -286,6 +286,267 @@
                     (c::sub-sint-sint |fuel| (c::sint-dec-const 1)))))
       ,(emit-tail loop-name))))
 
+;; :end — opcode 0x0b end; label-stack aware.
+;; When nl == 0 this is the top-level end and we halt.  Otherwise pop
+;; the current label and advance pc by 1.  Strict superset of :end-toplevel.
+(defun emit-arm-end (opcode loop-name)
+  (declare (xargs :mode :program))
+  (list
+   (emit-test opcode)
+   `(if (c::boolean-from-sint
+         (c::eq-sint-sint |nl| (c::sint-dec-const 0)))
+        (let* ((|halted| (c::assign (c::sint-dec-const 1)))
+               (|fuel| (c::assign
+                        (c::sub-sint-sint |fuel| (c::sint-dec-const 1)))))
+          ,(emit-tail loop-name))
+      (let* ((|nl| (c::assign
+                    (c::sub-sint-sint |nl| (c::sint-dec-const 1))))
+             (|pc| (c::assign
+                    (c::add-sint-sint |pc| (c::sint-dec-const 1))))
+             (|fuel| (c::assign
+                      (c::sub-sint-sint |fuel| (c::sint-dec-const 1)))))
+        ,(emit-tail loop-name)))))
+
+;; :i32-unop-eqz — opcode 0x45 i32.eqz (peek-and-replace, no sp change).
+(defun emit-arm-i32-unop-eqz (opcode loop-name)
+  (declare (xargs :mode :program))
+  (list
+   (emit-test opcode)
+   `(let* ((|ok| (c::declar
+                  (c::gt-sint-sint |sp| (c::sint-dec-const 0))))
+           (|idx| (c::declar
+                   (c::condexpr
+                    (if (c::boolean-from-sint |ok|)
+                        (c::sub-sint-sint |sp| (c::sint-dec-const 1))
+                      (c::sint-dec-const 0)))))
+           (|v| (c::declar (struct-|wst|-read-|op|-element |idx| |st|)))
+           (|is0| (c::declar
+                   (c::sint-from-boolean
+                    (or (c::boolean-from-sint
+                         (c::eq-uint-uint |v| (c::uint-dec-const 0)))
+                        (c::boolean-from-sint
+                         (c::eq-uint-uint |v| (c::uint-dec-const 0)))))))
+           (|new_v| (c::declar (c::uint-from-sint |is0|)))
+           (|st| (struct-|wst|-write-|op|-element |idx| |new_v| |st|))
+           ,@(emit-pc-halted-fuel 1 '|ok| loop-name))
+      ,(emit-tail loop-name))))
+
+;; :block — opcode 0x02 BT.  Requires the host to provide |scan_end|
+;; (as in ../wasm-vm1.lisp) and `lpc`/`lsp`/`lkind` slots on |wst|.
+;; Pushes a label with target = pc after matching end.
+(defun emit-arm-block (opcode loop-name)
+  (declare (xargs :mode :program))
+  (list
+   (emit-test opcode)
+   `(let* ((|ok| (c::declar
+                  (c::lt-sint-sint |nl| (c::sint-dec-const 16))))
+           (|nl_safe| (c::declar
+                       (c::condexpr
+                        (if (c::boolean-from-sint |ok|)
+                            |nl|
+                          (c::sint-dec-const 0)))))
+           (|end_pc_raw| (c::declar
+                          (|scan_end|
+                           (c::add-sint-sint |pc| (c::sint-dec-const 2))
+                           |wasm_buf|)))
+           (|end_pc| (c::declar
+                      (c::condexpr
+                       (if (c::boolean-from-sint
+                            (c::sint-from-boolean
+                             (and (c::boolean-from-sint
+                                   (c::ge-sint-sint
+                                    |end_pc_raw| (c::sint-dec-const 0)))
+                                  (c::boolean-from-sint
+                                   (c::le-sint-sint
+                                    |end_pc_raw| (c::sint-dec-const 60000))))))
+                           |end_pc_raw|
+                         (c::sint-dec-const 0)))))
+           (|st| (struct-|wst|-write-|lpc|-element |nl_safe| |end_pc| |st|))
+           (|st| (struct-|wst|-write-|lsp|-element |nl_safe| |sp| |st|))
+           (|st| (struct-|wst|-write-|lkind|-element
+                  |nl_safe|
+                  (c::uchar-from-sint (c::sint-dec-const 0))
+                  |st|))
+           (|nl| (c::assign
+                  (c::condexpr
+                   (if (c::boolean-from-sint |ok|)
+                       (c::add-sint-sint |nl| (c::sint-dec-const 1))
+                     |nl|))))
+           ,@(emit-pc-halted-fuel 2 '|ok| loop-name))
+      ,(emit-tail loop-name))))
+
+;; :loop-begin — opcode 0x03 BT.  Label target is start of loop body
+;; (pc + 2).  kind=1 distinguishes loop from block at br time.
+(defun emit-arm-loop-begin (opcode loop-name)
+  (declare (xargs :mode :program))
+  (list
+   (emit-test opcode)
+   `(let* ((|ok| (c::declar
+                  (c::lt-sint-sint |nl| (c::sint-dec-const 16))))
+           (|nl_safe| (c::declar
+                       (c::condexpr
+                        (if (c::boolean-from-sint |ok|)
+                            |nl|
+                          (c::sint-dec-const 0)))))
+           (|loop_pc| (c::declar
+                       (c::add-sint-sint |pc| (c::sint-dec-const 2))))
+           (|st| (struct-|wst|-write-|lpc|-element |nl_safe| |loop_pc| |st|))
+           (|st| (struct-|wst|-write-|lsp|-element |nl_safe| |sp| |st|))
+           (|st| (struct-|wst|-write-|lkind|-element
+                  |nl_safe|
+                  (c::uchar-from-sint (c::sint-dec-const 1))
+                  |st|))
+           (|nl| (c::assign
+                  (c::condexpr
+                   (if (c::boolean-from-sint |ok|)
+                       (c::add-sint-sint |nl| (c::sint-dec-const 1))
+                     |nl|))))
+           (|pc| (c::assign |loop_pc|))
+           (|halted| (c::assign
+                      (c::condexpr
+                       (if (c::boolean-from-sint |ok|)
+                           |halted|
+                         (c::sint-dec-const 1)))))
+           (|fuel| (c::assign
+                    (c::sub-sint-sint |fuel| (c::sint-dec-const 1)))))
+      ,(emit-tail loop-name))))
+
+;; :br and :br-if — opcode 0x0c / 0x0d.  is-conditional decides whether
+;; we pop a value and test it before jumping.  The peek bindings
+;; (peek_idx/peek_v/cond_true) are only introduced in the conditional
+;; case so ATC's ignore-formal rule is satisfied.
+(defun emit-arm-br (opcode is-conditional loop-name)
+  (declare (xargs :mode :program))
+  (list
+   (emit-test opcode)
+   `(let* ((|l_byte| (c::declar (byte-at
+                                 (c::add-sint-sint
+                                  |pc| (c::sint-dec-const 1)))))
+           (|pop_ok| (c::declar
+                      ,(if is-conditional
+                           '(c::gt-sint-sint |sp| (c::sint-dec-const 0))
+                         '(c::sint-dec-const 1))))
+           (|sp_after_pop|
+            (c::declar
+             ,(if is-conditional
+                  '(c::condexpr
+                    (if (c::boolean-from-sint
+                         (c::gt-sint-sint |sp| (c::sint-dec-const 0)))
+                        (c::sub-sint-sint |sp| (c::sint-dec-const 1))
+                      |sp|))
+                '|sp|)))
+           ,@(and is-conditional
+                  '((|peek_idx| (c::declar
+                                 (c::condexpr
+                                  (if (c::boolean-from-sint
+                                       (c::gt-sint-sint
+                                        |sp| (c::sint-dec-const 0)))
+                                      (c::sub-sint-sint
+                                       |sp| (c::sint-dec-const 1))
+                                    (c::sint-dec-const 0)))))
+                    (|peek_v| (c::declar (struct-|wst|-read-|op|-element
+                                          |peek_idx| |st|)))
+                    (|cond_true| (c::declar
+                                  (c::sint-from-boolean
+                                   (or (c::boolean-from-sint
+                                        (c::ne-uint-uint
+                                         |peek_v|
+                                         (c::uint-dec-const 0)))
+                                       (c::boolean-from-sint
+                                        (c::ne-uint-uint
+                                         |peek_v|
+                                         (c::uint-dec-const 0)))))))))
+           (|take| (c::declar
+                    ,(if is-conditional
+                         '(c::sint-from-boolean
+                           (or (c::boolean-from-sint |cond_true|)
+                               (c::boolean-from-sint |cond_true|)))
+                       '(c::sint-dec-const 1))))
+           (|l_ok| (c::declar
+                    (c::lt-sint-sint |l_byte| |nl|)))
+           (|target_idx| (c::declar
+                          (c::condexpr
+                           (if (c::boolean-from-sint |l_ok|)
+                               (c::sub-sint-sint
+                                (c::sub-sint-sint
+                                 |nl| (c::sint-dec-const 1))
+                                |l_byte|)
+                             (c::sint-dec-const 0)))))
+           (|tpc_raw| (c::declar (struct-|wst|-read-|lpc|-element
+                                  |target_idx| |st|)))
+           (|tsp_raw| (c::declar (struct-|wst|-read-|lsp|-element
+                                  |target_idx| |st|)))
+           (|tkind_uc| (c::declar (struct-|wst|-read-|lkind|-element
+                                   |target_idx| |st|)))
+           (|tkind| (c::declar (c::sint-from-uchar |tkind_uc|)))
+           (|tpc_ok| (c::declar
+                      (c::sint-from-boolean
+                       (and (c::boolean-from-sint
+                             (c::ge-sint-sint
+                              |tpc_raw| (c::sint-dec-const 0)))
+                            (c::boolean-from-sint
+                             (c::le-sint-sint
+                              |tpc_raw| (c::sint-dec-const 60000)))))))
+           (|tsp_ok| (c::declar
+                      (c::sint-from-boolean
+                       (and (c::boolean-from-sint
+                             (c::ge-sint-sint
+                              |tsp_raw| (c::sint-dec-const 0)))
+                            (c::boolean-from-sint
+                             (c::le-sint-sint
+                              |tsp_raw| (c::sint-dec-const 64)))))))
+           (|all_ok| (c::declar
+                      (c::sint-from-boolean
+                       (and (c::boolean-from-sint |pop_ok|)
+                            (c::boolean-from-sint |l_ok|)
+                            (c::boolean-from-sint |tpc_ok|)
+                            (c::boolean-from-sint |tsp_ok|)))))
+           (|new_nl|
+            (c::declar
+             (c::condexpr
+              (if (c::boolean-from-sint
+                   (c::sint-from-boolean
+                    (and (c::boolean-from-sint |all_ok|)
+                         (c::boolean-from-sint |take|))))
+                  (c::condexpr
+                   (if (c::boolean-from-sint
+                        (c::eq-sint-sint
+                         |tkind| (c::sint-dec-const 1)))
+                       (c::add-sint-sint
+                        |target_idx| (c::sint-dec-const 1))
+                     |target_idx|))
+                |nl|))))
+           (|new_sp|
+            (c::declar
+             (c::condexpr
+              (if (c::boolean-from-sint
+                   (c::sint-from-boolean
+                    (and (c::boolean-from-sint |all_ok|)
+                         (c::boolean-from-sint |take|))))
+                  |tsp_raw|
+                |sp_after_pop|))))
+           (|new_pc|
+            (c::declar
+             (c::condexpr
+              (if (c::boolean-from-sint
+                   (c::sint-from-boolean
+                    (and (c::boolean-from-sint |all_ok|)
+                         (c::boolean-from-sint |take|))))
+                  |tpc_raw|
+                (c::add-sint-sint
+                 |pc| (c::sint-dec-const 2))))))
+           (|sp| (c::assign |new_sp|))
+           (|nl| (c::assign |new_nl|))
+           (|pc| (c::assign |new_pc|))
+           (|halted| (c::assign
+                      (c::condexpr
+                       (if (c::boolean-from-sint |all_ok|)
+                           |halted|
+                         (c::sint-dec-const 1)))))
+           (|fuel| (c::assign
+                    (c::sub-sint-sint |fuel| (c::sint-dec-const 1)))))
+      ,(emit-tail loop-name))))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Dispatcher on one entry.
 
@@ -305,6 +566,12 @@
       (:i32-binop-nz     (emit-arm-i32-binop-nz     opcode (first args)
                                                     loop-name))
       (:end-toplevel     (emit-arm-end-toplevel     opcode loop-name))
+      (:end              (emit-arm-end              opcode loop-name))
+      (:i32-unop-eqz     (emit-arm-i32-unop-eqz     opcode loop-name))
+      (:block            (emit-arm-block            opcode loop-name))
+      (:loop-begin       (emit-arm-loop-begin       opcode loop-name))
+      (:br               (emit-arm-br               opcode nil loop-name))
+      (:br-if            (emit-arm-br               opcode t   loop-name))
       (t (er hard? 'emit-arm "Unknown shape: ~x0" shape)))))
 
 ;; Fold arms into a nested if-else chain.
@@ -323,10 +590,24 @@
          ,(emit-dispatch (cdr entries) loop-name)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Top-level loop generator.
+;; Predicate: does this table use any control-flow shape?
+;; If yes, the loop defun needs guard enables for the lpc/lsp/lkind
+;; INDEX-OKP rules (which only exist when the host's |wst| has those
+;; slots — i.e. when integrating with ../wasm-vm1.lisp).
+
+(defun entries-have-control-flow-p (entries)
+  (declare (xargs :mode :program))
+  (if (endp entries)
+      nil
+    (let ((shape (first (car entries))))
+      (or (member shape '(:block :loop-begin :br :br-if))
+          (entries-have-control-flow-p (cdr entries))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defun emit-exec-loop (loop-name entries)
   (declare (xargs :mode :program))
+  (let ((has-cf (entries-have-control-flow-p entries)))
   `(defun ,loop-name (|st| |sp| |nl| |pc| |halted| |fuel| |wasm_buf|)
      (declare (xargs
        :guard (and (c::star (struct-|wst|-p |st|))
@@ -378,7 +659,12 @@
                  c::assign
                  c::condexpr
                  |STRUCT-wst-op-INDEX-OKP|
-                 |STRUCT-wst-loc-INDEX-OKP|)))
+                 |STRUCT-wst-loc-INDEX-OKP|
+                 ,@(and has-cf
+                        '(|STRUCT-wst-lpc-INDEX-OKP|
+                          |STRUCT-wst-lsp-INDEX-OKP|
+                          |STRUCT-wst-lkind-INDEX-OKP|
+                          |scan_end|)))))
        :measure (nfix (c::integer-from-sint |fuel|))
        :hints (("Goal"
                 :in-theory
@@ -408,7 +694,7 @@
              (let* ((|b| (c::declar (byte-at |pc|))))
                ,(emit-dispatch entries loop-name))
            (mv |st| |sp| |nl| |pc| |halted| |fuel|))
-       (mv |st| |sp| |nl| |pc| |halted| |fuel|))))
+       (mv |st| |sp| |nl| |pc| |halted| |fuel|))))) ; close let, defun
 
 (defmacro gen-exec-loop (loop-name &rest entries)
   (emit-exec-loop loop-name entries))
