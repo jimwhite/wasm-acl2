@@ -4,7 +4,7 @@
 ; containing the dispatcher as `exec_loop`.
 ;
 ; The table below is the entire per-op work.  No additional spec files,
-; no hand-written arm bodies.  Compare to ../wasm-vm1.lisp |exec$loop|
+; no hand-written arm bodies.  Compare to wasm-vm1.lisp |exec$loop|
 ; which has ~650 hand-written lines covering roughly this same set.
 
 (in-package "ACL2")

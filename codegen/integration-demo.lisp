@@ -1,7 +1,7 @@
 ; atc/codegen/integration-demo.lisp
 ;
 ; Integration: plug the generated execution loop into the hand-written
-; `.wasm' reader in ../wasm-vm1.lisp.  The pipeline is:
+; `.wasm' reader in wasm-vm1.lisp.  The pipeline is:
 ;
 ;       main.c → fread → wasm_buf[65536]
 ;                  │
@@ -17,14 +17,14 @@
 ;                  ▼
 ;              uint result
 ;
-; Deliberate contrast with ../wasm-vm1.lisp:
+; Deliberate contrast with wasm-vm1.lisp:
 ;   - |exec$loop|  there — HAND-WRITTEN ~650 lines of opcode arms.
 ;   - |exec_loop_gen| here — GENERATED from an 8-row table.
-; Both share ../wasm-vm1.lisp's state layout and parser.
+; Both share wasm-vm1.lisp's state layout and parser.
 
 (in-package "ACL2")
 
-(include-book "../wasm-vm1")
+(include-book "wasm-vm1")
 (include-book "loop")
 
 ;; wasm-vm1.lisp declares `sint-max->=-65600' LOCALly, so we re-declare
@@ -123,7 +123,7 @@
 
 ;; Needed so `|run_wasm_gen|'s guard proof can see that the loop preserves
 ;; `struct-|wst|-p'.  Mirrors `struct-wst-p-of-mv-nth-0-exec$loop' in
-;; ../wasm-vm1.lisp.
+;; wasm-vm1.lisp.
 (defrulel struct-wst-p-of-mv-nth-0-exec_loop_gen
   (implies (struct-|wst|-p |st|)
            (struct-|wst|-p
@@ -135,7 +135,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Top-level entry: seed argument locals, drive the loop, return op[0].
 ;;
-;; Mirrors |invoke| in ../wasm-vm1.lisp but calls the generated
+;; Mirrors |invoke| in wasm-vm1.lisp but calls the generated
 ;; |exec_loop_gen| instead of the hand-written |exec$loop|.  The caller
 ;; (main.c, or the equivalent) is responsible for calling |parse_module|
 ;; first to populate |m|, exactly as wasm-vm1's main does.

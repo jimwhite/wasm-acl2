@@ -10,7 +10,7 @@
 ; Why inline rather than call the step functions from the loop:
 ; ATC passes structs by value, so a step function that "mutates" |st| would
 ; not actually mutate the caller's st at C level.  The existing hand-written
-; `|exec$loop|` in ../wasm-vm1.lisp inlines all arms for exactly this reason.
+; `|exec$loop|` in wasm-vm1.lisp inlines all arms for exactly this reason.
 ; We do the same — but by table.
 ;
 ; Loop contract (mirrors wasm-vm1.lisp |exec$loop|):
@@ -332,7 +332,7 @@
       ,(emit-tail loop-name))))
 
 ;; :block — opcode 0x02 BT.  Requires the host to provide |scan_end|
-;; (as in ../wasm-vm1.lisp) and `lpc`/`lsp`/`lkind` slots on |wst|.
+;; (as in wasm-vm1.lisp) and `lpc`/`lsp`/`lkind` slots on |wst|.
 ;; Pushes a label with target = pc after matching end.
 (defun emit-arm-block (opcode loop-name)
   (declare (xargs :mode :program))
@@ -820,7 +820,7 @@
 ;; Predicate: does this table use any control-flow shape?
 ;; If yes, the loop defun needs guard enables for the lpc/lsp/lkind
 ;; INDEX-OKP rules (which only exist when the host's |wst| has those
-;; slots — i.e. when integrating with ../wasm-vm1.lisp).
+;; slots — i.e. when integrating with wasm-vm1.lisp).
 
 (defun entries-have-control-flow-p (entries)
   (declare (xargs :mode :program))

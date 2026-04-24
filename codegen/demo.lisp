@@ -1,7 +1,7 @@
 ; atc/codegen/demo.lisp
 ;
 ; Demonstration: the template-family generator emits ATC step
-; functions for seven operations in ../../execution.lisp, by shape.
+; functions for seven operations in ../execution.lisp, by shape.
 ; Each generated defun is admitted by ACL2 with full guard
 ; verification and translated to a standalone C function by ATC.
 ;

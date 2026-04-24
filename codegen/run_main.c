@@ -2,13 +2,13 @@
  * Driver for the spec-generated pipeline:
  *
  *   fread -> wasm_buf[65536]
- *         -> parse_module(&m)               (ATC-emitted from ../wasm-vm1.lisp)
+ *         -> parse_module(&m)               (ATC-emitted from wasm-vm1.lisp)
  *         -> run_wasm_gen(&st, &m, a, b)    (ATC-emitted from integration-demo.lisp)
  *         -> unsigned int result
  *
  * Usage: run_demo FILE.wasm EXPORT_NAME ARG1 ARG2
  *
- * Companion to ../main.c (which calls the hand-written invoke()).  Same CLI,
+ * Companion to ../atc/main.c (which calls the hand-written invoke()).  Same CLI,
  * same fixtures, so the two can be diffed against each other.
  */
 

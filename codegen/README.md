@@ -1,7 +1,7 @@
 # atc/codegen — spec-driven ATC step-function generator
 
 A small code generator that takes the operational WASM semantics in
-[../../execution.lisp](../../execution.lisp) as-is and, for each
+[../execution.lisp](../execution.lisp) as-is and, for each
 operation it understands, emits two artifacts:
 
 1. A standalone per-op **step function** in C.
@@ -29,14 +29,14 @@ $ wat2wasm addmod.wat -o addmod.wasm
 $ ./run_demo addmod.wasm addmod 30 10         → 40    (= (30+10) %% 50)
 $ ./run_demo addmod.wasm addmod 49 49         → 48    (= 98 %% 50)
 
-$ ./run_demo ../../tests/oracle/gcd.wasm        gcd       48 18        → 6
-$ ./run_demo ../../tests/oracle/gcd.wasm        gcd       1000000 999983 → 1
-$ ./run_demo ../../tests/oracle/factorial.wasm  factorial 5  0          → 120
-$ ./run_demo ../../tests/oracle/factorial.wasm  factorial 10 0          → 3628800
-$ ./run_demo ../../tests/oracle/is_prime.wasm   is_prime  7  0          → 1
-$ ./run_demo ../../tests/oracle/is_prime.wasm   is_prime  9  0          → 0
-$ ./run_demo ../../tests/oracle/collatz.wasm    collatz   27 0          → 111
-$ ./run_demo ../../tests/oracle/collatz.wasm    collatz   97 0          → 118
+$ ./run_demo ../tests/oracle/gcd.wasm        gcd       48 18        → 6
+$ ./run_demo ../tests/oracle/gcd.wasm        gcd       1000000 999983 → 1
+$ ./run_demo ../tests/oracle/factorial.wasm  factorial 5  0          → 120
+$ ./run_demo ../tests/oracle/factorial.wasm  factorial 10 0          → 3628800
+$ ./run_demo ../tests/oracle/is_prime.wasm   is_prime  7  0          → 1
+$ ./run_demo ../tests/oracle/is_prime.wasm   is_prime  9  0          → 0
+$ ./run_demo ../tests/oracle/collatz.wasm    collatz   27 0          → 111
+$ ./run_demo ../tests/oracle/collatz.wasm    collatz   97 0          → 118
 ```
 
 All results match the published oracle / hand-written reference.
@@ -101,7 +101,7 @@ The loop generator detects whether the opcode table includes any of
 into the generated guard hints. That way the control-flow-free
 `loop-demo.lisp` still certifies against a `|wst|` defstruct that has no
 `lpc`/`lsp`/`lkind` slots, while `integration-demo.lisp` picks up the
-richer struct from `../wasm-vm1.lisp` and gets the extra enables it needs.
+richer struct from `wasm-vm1.lisp` and gets the extra enables it needs.
 
 ### Execution loop
 
@@ -158,7 +158,7 @@ is_prime / collatz, adds:
 and produces [loop-demo.c](loop-demo.c) (8-op) or [run.c](run.c) (18-op)
 each containing a single dispatch C function. Compare to the ~1100
 hand-written lines covering this same set in
-[`../wasm-vm1.lisp`](../wasm-vm1.lisp) `|exec$loop|`.
+[`wasm-vm1.lisp`](wasm-vm1.lisp) `|exec$loop|`.
 
 Shape of the generated dispatcher (excerpt):
 
@@ -248,7 +248,7 @@ int exec_i32_rem_u(struct wst st, int sp) {
 ```
 
 Compare to the hand-written opcode arms inside
-[`../wasm-vm1.lisp`](../wasm-vm1.lisp) `|exec$loop|`, which are
+[`wasm-vm1.lisp`](wasm-vm1.lisp) `|exec$loop|`, which are
 ~40 ACL2 lines each of `ok` / `x_safe` / `sp_safe` / `halted`
 gating, fuel decrement, pc arithmetic, and the recursive tail. The
 generated versions are the "shape-pure" form: trap conditions live
@@ -261,7 +261,7 @@ Build: `make -j$(nproc) demo` (from this directory — uses
 
 [integration-demo.lisp](integration-demo.lisp) wires the generated
 `|exec_loop_gen|` to the hand-written `.wasm` reader in
-[../wasm-vm1.lisp](../wasm-vm1.lisp). The pipeline is:
+[wasm-vm1.lisp](wasm-vm1.lisp). The pipeline is:
 
 ```
     main.c → fread → wasm_buf[65536]
@@ -282,7 +282,7 @@ Build: `make -j$(nproc) demo` (from this directory — uses
 `c::atc` emits these three C functions plus the loop body (inlined into
 `run_wasm_gen` as a `while`) into [run.c](run.c) / [run.h](run.h).
 [run_main.c](run_main.c) is the CLI driver (same arg convention as
-`../main.c`):
+`../atc/main.c`):
 
 ```
 $ cd atc/codegen
@@ -295,9 +295,9 @@ $ ./run_demo addmod.wasm addmod 100 50   # (100+50) %% 50 = 0
 $ ./run_demo addmod.wasm addmod 49 49    # (98) %% 50 = 48
 48
 
-$ ./run_demo ../../tests/oracle/gcd.wasm gcd 48 18
+$ ./run_demo ../tests/oracle/gcd.wasm gcd 48 18
 6
-$ ./run_demo ../../tests/oracle/gcd.wasm gcd 1000000 999983
+$ ./run_demo ../tests/oracle/gcd.wasm gcd 1000000 999983
 1
 ```
 
@@ -316,7 +316,7 @@ Two additional drivers exist for regression / isolation work:
   exercising the generated loop without going through the parser
   (`./run_sanity add 3 4 → 7`, `./run_sanity rem_u 17 0 → 0` demonstrating
   the trap-to-halt path, etc.).
-- The hand-written `../wasm-vm1` binary takes the same CLI and implements
+- The hand-written `../atc/wasm-vm1` binary takes the same CLI and implements
   a different opcode subset (block / br_if / eqz for gcd), so the two
   can be diffed on fixtures that fall inside both vocabularies.
 
@@ -338,7 +338,7 @@ byte (fine for the 16-local state we've fixed).
 | [demo.lisp](demo.lisp)                   | Uses step-function emitters for 7 ops, then `c::atc` → [demo.c](demo.c).                 |
 | [loop.lisp](loop.lisp)                   | Per-shape emitters for **arms** spliced into a generated opcode-dispatch loop.           |
 | [loop-demo.lisp](loop-demo.lisp)         | Uses loop emitters for 8 opcodes plus `|exec_run|` entry, then `c::atc` → [loop-demo.c](loop-demo.c). |
-| [integration-demo.lisp](integration-demo.lisp) | Wires generated loop to hand-written parser from `../wasm-vm1.lisp`; emits [run.c](run.c) / [run.h](run.h). |
+| [integration-demo.lisp](integration-demo.lisp) | Wires generated loop to hand-written parser from `wasm-vm1.lisp`; emits [run.c](run.c) / [run.h](run.h). |
 | [run_main.c](run_main.c)                 | CLI driver: fread → parse_module → run_wasm_gen → print.                                 |
 | [run_sanity.c](run_sanity.c)             | Hand-crafted bytecode injector; exercises the generated loop without `parse_module`.      |
 | [addmod.wat](addmod.wat)                 | Smallest end-to-end WAT using only the 8 supported opcodes.                              |
@@ -418,7 +418,7 @@ person — or the next shape — doesn't re-trip them.
    ```
 
    This mirrors `struct-wst-p-of-mv-nth-0-exec$loop` in
-   [../wasm-vm1.lisp](../wasm-vm1.lisp). Without it, guard
+   [wasm-vm1.lisp](wasm-vm1.lisp). Without it, guard
    verification for the caller fails with checkpoints like
    `(STRUCT-wst-P (MV-NTH 0 (|exec_loop_gen| ...)))`. A future
    enhancement is for `gen-exec-loop` to emit this lemma
@@ -475,7 +475,7 @@ person — or the next shape — doesn't re-trip them.
     / `:br-if`.
 
 14. **Non-local return-type lemmas are needed for host helpers.**
-    `../wasm-vm1.lisp` declares `sintp-of-mv-nth-0-scan$loop` with
+    `wasm-vm1.lisp` declares `sintp-of-mv-nth-0-scan$loop` with
     `defrulel` (local to that book). The `:block` arm in the
     generated loop calls `|scan_end|`, which unfolds into
     `mv-nth 0` of `|scan$loop|`, and that needs to be an `sintp`
@@ -580,7 +580,7 @@ concrete `uint` `v` that lives in the op/loc array slot.
 
 Each template knows one structural shape in the spec. For example,
 the `:local-idx-pusher` template is a refinement of this spec shape
-(from [../../execution.lisp](../../execution.lisp#L1000-L1013)):
+(from [../execution.lisp](../execution.lisp#L1000-L1013)):
 
 ```lisp
 (b* ((x (first args))
@@ -622,7 +622,7 @@ later step but is not necessary for the code-generation job.
 
 ## What this proves about the original concern
 
-The original `|exec$loop|` in [../wasm-vm1.lisp](../wasm-vm1.lisp)
+The original `|exec$loop|` in [wasm-vm1.lisp](wasm-vm1.lisp)
 was hand-authored bottom-up from the C we wanted, not top-down from
 the spec. Every opcode arm there carries the plumbing of being *inside*
 a dispatch loop: `ok`/`x_safe`/`halted` gating, fuel decrement, PC

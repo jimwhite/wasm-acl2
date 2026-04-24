@@ -87,10 +87,10 @@ oracle-verified-m1: atc/wasm-vm1 $(ORACLE_WASM)
 
 # ---- ATC-generated dispatch-loop demo (18-opcode codegen) -----------------
 #
-# atc/codegen/integration-demo.cert produces atc/codegen/run.c + run.h via
-# the spec-driven template family in atc/codegen/{loop,templates}.lisp.
+# codegen/integration-demo.cert produces codegen/run.c + run.h via the
+# spec-driven template family in codegen/{loop,templates}.lisp.
 # run_main.c is the CLI wrapper that mirrors atc/main.c's arg convention.
-# See atc/codegen/README.md for the full pipeline description.
+# See codegen/README.md for the full pipeline description.
 
 CODEGEN_FIXTURES := \
     tests/oracle/gcd.wasm:gcd:48:18:6                    \
@@ -102,25 +102,25 @@ CODEGEN_FIXTURES := \
     tests/oracle/collatz.wasm:collatz:27:0:111           \
     tests/oracle/collatz.wasm:collatz:97:0:118
 
-atc/codegen/integration-demo.cert atc/codegen/run.c atc/codegen/run.h: \
-        atc/codegen/integration-demo.lisp atc/codegen/loop.lisp \
-        atc/codegen/templates.lisp atc/codegen/state-model.lisp \
-        atc/codegen/cert.acl2 atc/wasm-vm1.cert
-	$(CERT) --acl2 $(ACL2) -j $(JOBS) atc/codegen/integration-demo
+codegen/integration-demo.cert codegen/run.c codegen/run.h: \
+        codegen/integration-demo.lisp codegen/loop.lisp \
+        codegen/templates.lisp codegen/state-model.lisp \
+        codegen/wasm-vm1.lisp codegen/cert.acl2
+	$(CERT) --acl2 $(ACL2) -j $(JOBS) codegen/integration-demo
 
-atc/codegen/run_demo: atc/codegen/run.c atc/codegen/run.h atc/codegen/run_main.c
-	$(CC) $(CFLAGS) -Iatc/codegen atc/codegen/run.c atc/codegen/run_main.c -o $@
+codegen/run_demo: codegen/run.c codegen/run.h codegen/run_main.c
+	$(CC) $(CFLAGS) -Icodegen codegen/run.c codegen/run_main.c -o $@
 
-codegen-demo: atc/codegen/run_demo
+codegen-demo: codegen/run_demo
 
-codegen-run: atc/codegen/run_demo $(WASM_BINARIES)
+codegen-run: codegen/run_demo $(WASM_BINARIES)
 	@set -e; for f in $(CODEGEN_FIXTURES); do \
 	  wasm=$$(echo $$f | cut -d: -f1); \
 	  name=$$(echo $$f | cut -d: -f2); \
 	  a=$$(echo $$f | cut -d: -f3); \
 	  b=$$(echo $$f | cut -d: -f4); \
 	  exp=$$(echo $$f | cut -d: -f5); \
-	  got=$$(./atc/codegen/run_demo $$wasm $$name $$a $$b); \
+	  got=$$(./codegen/run_demo $$wasm $$name $$a $$b); \
 	  printf "%-9s %-16s a=%-7s b=%-4s got=%-8s exp=%-8s " \
 	         "$$name" "`basename $$wasm`" "$$a" "$$b" "$$got" "$$exp"; \
 	  if [ "$$got" = "$$exp" ]; then echo OK; else echo FAIL; exit 1; fi; \
@@ -135,7 +135,8 @@ clean:
 	       -o -name '*.cert.time' -o -name '*.out' \
 	       -o -name '*.lx86cl64fsl' -o -name '*.dx64fsl' \) -delete
 	rm -f atc/wasm-vm1 atc/wasm-vm1.c atc/wasm-vm1.h
-	rm -f atc/codegen/run_demo atc/codegen/run.c atc/codegen/run.h \
-	      atc/codegen/demo.c atc/codegen/demo.h \
-	      atc/codegen/loop-demo.c atc/codegen/loop-demo.h \
-	      atc/codegen/run_sanity
+	rm -f codegen/run_demo codegen/run.c codegen/run.h \
+	      codegen/wasm-vm1.c codegen/wasm-vm1.h \
+	      codegen/demo.c codegen/demo.h \
+	      codegen/loop-demo.c codegen/loop-demo.h \
+	      codegen/run_sanity
