@@ -11,12 +11,23 @@ there is one emitter macro, and the per-op work is one line.
 
 ## Status
 
-Today: two operations generated end-to-end.
+Today: seven operations generated end-to-end, six template shapes.
 
-| Spec                    | Shape                | Generated ACL2           | Generated C         |
-|-------------------------|----------------------|--------------------------|---------------------|
-| `wasm::execute-local.get` | `:local-idx-pusher` | `|exec_local_get|`       | `exec_local_get`    |
-| `wasm::execute-local.set` | `:local-idx-popper` | `|exec_local_set|`       | `exec_local_set`    |
+| Spec                      | Shape                         | Generated ACL2        | Generated C         |
+|---------------------------|-------------------------------|-----------------------|---------------------|
+| `wasm::execute-local.get` | `:local-idx-pusher`           | `|exec_local_get|`    | `exec_local_get`    |
+| `wasm::execute-local.set` | `:local-idx-popper`           | `|exec_local_set|`    | `exec_local_set`    |
+| `wasm::execute-local.tee` | `:local-idx-teer`             | `|exec_local_tee|`    | `exec_local_tee`    |
+| `wasm::execute-drop`      | `:drop`                       | `|exec_drop|`         | `exec_drop`         |
+| `wasm::execute-i32.const` | `:i32-const`                  | `|exec_i32_const|`    | `exec_i32_const`    |
+| `wasm::execute-i32.add`   | `:i32-binop-total` + uint-op  | `|exec_i32_add|`      | `exec_i32_add`      |
+| `wasm::execute-i32.rem_u` | `:i32-binop-nz` + uint-op     | `|exec_i32_rem_u|`    | `exec_i32_rem_u`    |
+
+The `:i32-binop-total` shape is parameterized by the ATC uint
+operator and so covers `add`/`sub`/`mul`/`and`/`or`/`xor` with a
+single additional line each. The `:i32-binop-nz` shape hoists the
+divisor-nonzero trap into the ACL2 guard (via the op's `-okp`
+predicate) and covers `div_u`/`rem_u` in one line each.
 
 The generated C, as emitted by ATC into [demo.c](demo.c):
 
@@ -35,11 +46,51 @@ int exec_local_set(struct wst st, int sp, int x) {
     sp = idx;
     return sp;
 }
+
+int exec_local_tee(struct wst st, int sp, int x) {
+    int idx = sp - 1;
+    unsigned int val = st.op[idx];
+    st.loc[x] = val;
+    return sp;
+}
+
+int exec_drop(struct wst st, int sp) {
+    return sp - 1;
+}
+
+int exec_i32_const(struct wst st, int sp, unsigned int n) {
+    st.op[sp] = n;
+    sp = sp + 1;
+    return sp;
+}
+
+int exec_i32_add(struct wst st, int sp) {
+    int i1 = sp - 2;
+    int i2 = sp - 1;
+    unsigned int v1 = st.op[i1];
+    unsigned int v2 = st.op[i2];
+    unsigned int r = v1 + v2;
+    st.op[i1] = r;
+    sp = i2;
+    return sp;
+}
+
+int exec_i32_rem_u(struct wst st, int sp) {
+    int i1 = sp - 2;
+    int i2 = sp - 1;
+    unsigned int v1 = st.op[i1];
+    unsigned int v2 = st.op[i2];
+    unsigned int r = v1 % v2;
+    st.op[i1] = r;
+    sp = i2;
+    return sp;
+}
 ```
 
-Compare to the hand-written `local.get` arm inside
-[`../wasm-vm1.lisp`](../wasm-vm1.lisp) `|exec$loop|`, which is ~40
-ACL2 lines of `ok` / `x_safe` / `sp_safe` / `halted` gating. The
+Compare to the hand-written opcode arms inside
+[`../wasm-vm1.lisp`](../wasm-vm1.lisp) `|exec$loop|`, which are
+~40 ACL2 lines each of `ok` / `x_safe` / `sp_safe` / `halted`
+gating, fuel decrement, pc arithmetic, and the recursive tail. The
 generated versions are the "shape-pure" form: trap conditions live
 in the ACL2 guard, not in the body.
 
@@ -115,33 +166,30 @@ later step but is not necessary for the code-generation job.
 
 For a new operation whose spec doesn't fit an existing shape, add one
 template macro to [templates.lisp](templates.lisp) and one dispatch
-entry to `gen-exec-op`. Sketch for drop (pop-one, no operand, no
-local):
+entry to `gen-exec-op`. Existing templates to copy from:
 
-```lisp
-(defmacro gen-drop-shape (name)
-  `(defun ,name (|st| |sp|)
-     (declare (xargs :guard (and (struct-|wst|-p |st|)
-                                 (c::sintp |sp|)
-                                 (< 0 (c::integer-from-sint |sp|))
-                                 (<= (c::integer-from-sint |sp|) 64))
-                     :guard-hints
-                     (("Goal" :in-theory (enable c::sub-sint-sint
-                                                 c::sub-sint-sint-okp
-                                                 c::sint-integerp-alt-def
-                                                 c::integer-from-cinteger-alt-def
-                                                 c::declar)))))
-     (declare (ignore |st|))
-     (c::sub-sint-sint |sp| (c::sint-dec-const 1))))
-```
+- **Stack-only shapes** (no immediate): `:drop`, `:i32-binop-total`,
+  `:i32-binop-nz`.
+- **Immediate shapes**: `:i32-const` (u32), `:local-idx-pusher` /
+  `:local-idx-popper` / `:local-idx-teer` (local index).
+- **Parameterized shapes**: `:i32-binop-total` takes the ATC op
+  symbol (`c::add-uint-uint`, `c::mul-uint-uint`, …);
+  `:i32-binop-nz` additionally takes the op's `-okp` predicate.
 
-Binops over i32 are a single shape (`:i32-binop`) parameterized by
-the ATC op symbol; `local.tee` is a trivial variant of the popper
-that doesn't decrement `sp`; `i32.const` is the pure pusher with the
-immediate as the second argument. Half of `execution.lisp` fits into
-maybe six shapes; control-flow (`block`/`loop`/`br`/`end`) does not
-fit the "one step per op" abstraction and belongs to the dispatcher,
-not this generator.
+Most of `execution.lisp` fits into shapes of this kind. Future
+additions likely needed:
+
+- `:i32-unop` — `clz`/`ctz`/`popcnt`/`eqz` (one pop, one push).
+- `:i32-relop` — `eq`/`ne`/`lt_u`/`lt_s`/… (two pops, push 0/1).
+- `:i32-shift` — like binop-total but the rhs is masked `% 32`.
+- `:i32-binop-signed` / `:i32-binop-signed-nz` — for `div_s`/`rem_s`.
+- `:global-get-set` — straightforward pusher/popper over a separate
+  `glob[]` array added to `|wst|`.
+- `:i64-*` — same shapes re-instantiated for 64-bit.
+
+Control-flow (`block`/`loop`/`br`/`br_if`/`end`/`call`) does not fit
+the "one step per op, no dispatch" abstraction and belongs to the
+dispatcher layer, not this generator.
 
 ## What this proves about the original concern
 

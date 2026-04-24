@@ -122,21 +122,206 @@
        |sp|)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Shape: local-idx-teer (local.tee).
+;;
+;; Peek top of operand stack, write to local x, leave sp unchanged.
+;;
+;;   (let* ((idx (c::declar (c::sub-sint-sint sp (c::sint-dec-const 1))))
+;;          (val (c::declar (struct-|wst|-read-|op|-element idx st)))
+;;          (st  (struct-|wst|-write-|loc|-element x val st)))
+;;     sp)
+
+(defmacro gen-local-idx-teer (name)
+  `(defun ,name (|st| |sp| |x|)
+     (declare (xargs :guard (and (struct-|wst|-p |st|)
+                                 (c::sintp |sp|)
+                                 (c::sintp |x|)
+                                 (< 0 (c::integer-from-sint |sp|))
+                                 (<= (c::integer-from-sint |sp|) 64)
+                                 (<= 0 (c::integer-from-sint |x|))
+                                 (< (c::integer-from-sint |x|) 16))
+                     :guard-hints
+                     (("Goal"
+                       :in-theory
+                       (enable c::sub-sint-sint
+                               c::sub-sint-sint-okp
+                               c::sint-integerp-alt-def
+                               c::integer-from-cinteger-alt-def
+                               c::declar
+                               |STRUCT-wst-op-INDEX-OKP|
+                               |STRUCT-wst-loc-INDEX-OKP|)))))
+     (let* ((|idx| (c::declar (c::sub-sint-sint |sp|
+                                                (c::sint-dec-const 1))))
+            (|val| (c::declar (struct-|wst|-read-|op|-element |idx| |st|)))
+            (|st|  (struct-|wst|-write-|loc|-element |x| |val| |st|)))
+       (declare (ignorable |st|))
+       |sp|)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Shape: drop.  Pop one operand; state struct is unchanged.
+;;
+;;   (c::sub-sint-sint sp (c::sint-dec-const 1))
+
+(defmacro gen-drop (name)
+  `(defun ,name (|st| |sp|)
+     (declare (xargs :guard (and (struct-|wst|-p |st|)
+                                 (c::sintp |sp|)
+                                 (< 0 (c::integer-from-sint |sp|))
+                                 (<= (c::integer-from-sint |sp|) 64))
+                     :guard-hints
+                     (("Goal"
+                       :in-theory
+                       (enable c::sub-sint-sint
+                               c::sub-sint-sint-okp
+                               c::sint-integerp-alt-def
+                               c::integer-from-cinteger-alt-def)))))
+     (declare (ignore |st|))
+     (c::sub-sint-sint |sp| (c::sint-dec-const 1))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Shape: i32-const.  Push immediate n onto operand stack; sp++.
+;;
+;; The immediate is passed as a u32 uint parameter.
+;;
+;;   (let* ((st (struct-|wst|-write-|op|-element sp n st))
+;;          (sp (c::assign (c::add-sint-sint sp (c::sint-dec-const 1)))))
+;;     sp)
+
+(defmacro gen-i32-const (name)
+  `(defun ,name (|st| |sp| |n|)
+     (declare (xargs :guard (and (struct-|wst|-p |st|)
+                                 (c::sintp |sp|)
+                                 (c::uintp |n|)
+                                 (<= 0 (c::integer-from-sint |sp|))
+                                 (< (c::integer-from-sint |sp|) 63))
+                     :guard-hints
+                     (("Goal"
+                       :in-theory
+                       (enable c::add-sint-sint
+                               c::add-sint-sint-okp
+                               c::sint-integerp-alt-def
+                               c::integer-from-cinteger-alt-def
+                               c::declar
+                               |STRUCT-wst-op-INDEX-OKP|)))))
+     (let* ((|st| (struct-|wst|-write-|op|-element |sp| |n| |st|))
+            (|sp| (c::assign (c::add-sint-sint |sp|
+                                               (c::sint-dec-const 1)))))
+       (declare (ignorable |st|))
+       |sp|)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Shape: i32-binop-total — add/sub/mul/and/or/xor.
+;;
+;; Pop two operands, apply the C uint op (modular 2^32), push result.
+;; sp decreases by 1.  Parameterized by the ATC op symbol, e.g.
+;; c::add-uint-uint.
+;;
+;;   (let* ((i1 (c::declar (c::sub-sint-sint sp (c::sint-dec-const 2))))
+;;          (i2 (c::declar (c::sub-sint-sint sp (c::sint-dec-const 1))))
+;;          (v1 (c::declar (struct-|wst|-read-|op|-element i1 st)))
+;;          (v2 (c::declar (struct-|wst|-read-|op|-element i2 st)))
+;;          (r  (c::declar (<op> v1 v2)))
+;;          (st (struct-|wst|-write-|op|-element i1 r st))
+;;          (sp (c::assign i2)))
+;;     sp)
+
+(defmacro gen-i32-binop-total (name op)
+  `(defun ,name (|st| |sp|)
+     (declare (xargs :guard (and (struct-|wst|-p |st|)
+                                 (c::sintp |sp|)
+                                 (<= 2 (c::integer-from-sint |sp|))
+                                 (<= (c::integer-from-sint |sp|) 64))
+                     :guard-hints
+                     (("Goal"
+                       :in-theory
+                       (enable c::sub-sint-sint
+                               c::sub-sint-sint-okp
+                               c::sint-integerp-alt-def
+                               c::integer-from-cinteger-alt-def
+                               c::declar
+                               |STRUCT-wst-op-INDEX-OKP|)))))
+     (let* ((|i1| (c::declar (c::sub-sint-sint |sp|
+                                               (c::sint-dec-const 2))))
+            (|i2| (c::declar (c::sub-sint-sint |sp|
+                                               (c::sint-dec-const 1))))
+            (|v1| (c::declar (struct-|wst|-read-|op|-element |i1| |st|)))
+            (|v2| (c::declar (struct-|wst|-read-|op|-element |i2| |st|)))
+            (|r|  (c::declar (,op |v1| |v2|)))
+            (|st| (struct-|wst|-write-|op|-element |i1| |r| |st|))
+            (|sp| (c::assign |i2|)))
+       (declare (ignorable |st|))
+       |sp|)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Shape: i32-binop-nz — i32.div_u, i32.rem_u.
+;;
+;; Like i32-binop-total but the C op has an -okp predicate that
+;; requires the divisor to be nonzero.  We hoist that into the ACL2
+;; guard, so the body stays linear.  Parameterized by (op, op-okp).
+
+(defmacro gen-i32-binop-nz (name op op-okp)
+  `(defun ,name (|st| |sp|)
+     (declare (xargs :guard
+                     (and (struct-|wst|-p |st|)
+                          (c::sintp |sp|)
+                          (<= 2 (c::integer-from-sint |sp|))
+                          (<= (c::integer-from-sint |sp|) 64)
+                          (,op-okp
+                           (struct-|wst|-read-|op|-element
+                            (c::sub-sint-sint |sp| (c::sint-dec-const 2))
+                            |st|)
+                           (struct-|wst|-read-|op|-element
+                            (c::sub-sint-sint |sp| (c::sint-dec-const 1))
+                            |st|)))
+                     :guard-hints
+                     (("Goal"
+                       :in-theory
+                       (enable c::sub-sint-sint
+                               c::sub-sint-sint-okp
+                               c::sint-integerp-alt-def
+                               c::integer-from-cinteger-alt-def
+                               c::declar
+                               |STRUCT-wst-op-INDEX-OKP|)))))
+     (let* ((|i1| (c::declar (c::sub-sint-sint |sp|
+                                               (c::sint-dec-const 2))))
+            (|i2| (c::declar (c::sub-sint-sint |sp|
+                                               (c::sint-dec-const 1))))
+            (|v1| (c::declar (struct-|wst|-read-|op|-element |i1| |st|)))
+            (|v2| (c::declar (struct-|wst|-read-|op|-element |i2| |st|)))
+            (|r|  (c::declar (,op |v1| |v2|)))
+            (|st| (struct-|wst|-write-|op|-element |i1| |r| |st|))
+            (|sp| (c::assign |i2|)))
+       (declare (ignorable |st|))
+       |sp|)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; The one-line generator entry point.  `shape' selects the template;
 ;; everything else is filled in by the template itself.
 ;;
 ;; Usage:
-;;   (gen-exec-op :local-idx-pusher |exec-local.get|)
-;;   (gen-exec-op :local-idx-popper |exec-local.set|)
+;;   (gen-exec-op :local-idx-pusher |exec_local_get|)
+;;   (gen-exec-op :local-idx-popper |exec_local_set|)
+;;   (gen-exec-op :local-idx-teer   |exec_local_tee|)
+;;   (gen-exec-op :drop             |exec_drop|)
+;;   (gen-exec-op :i32-const        |exec_i32_const|)
+;;   (gen-exec-op :i32-binop-total  |exec_i32_add| c::add-uint-uint)
+;;   (gen-exec-op :i32-binop-nz     |exec_i32_rem_u| c::rem-uint-uint
+;;                                                   c::rem-uint-uint-okp)
 ;;
 ;; The shape is the generator's knowledge of how the spec is structured;
 ;; it is not an annotation on the spec, and the spec in execution.lisp
 ;; is unchanged.
 
-(defmacro gen-exec-op (shape name)
+(defmacro gen-exec-op (shape name &rest args)
   (case shape
     (:local-idx-pusher `(gen-local-idx-pusher ,name))
     (:local-idx-popper `(gen-local-idx-popper ,name))
+    (:local-idx-teer   `(gen-local-idx-teer   ,name))
+    (:drop             `(gen-drop             ,name))
+    (:i32-const        `(gen-i32-const        ,name))
+    (:i32-binop-total  `(gen-i32-binop-total  ,name ,(first args)))
+    (:i32-binop-nz     `(gen-i32-binop-nz     ,name ,(first args)
+                                                    ,(second args)))
     (t (er hard? 'gen-exec-op
            "Unknown shape ~x0.  Add a template in templates.lisp."
            shape))))

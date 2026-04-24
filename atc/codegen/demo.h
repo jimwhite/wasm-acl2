@@ -8,3 +8,13 @@ struct wst {
 int exec_local_get(struct wst st, int sp, int x);
 
 int exec_local_set(struct wst st, int sp, int x);
+
+int exec_local_tee(struct wst st, int sp, int x);
+
+int exec_drop(struct wst st, int sp);
+
+int exec_i32_const(struct wst st, int sp, unsigned int n);
+
+int exec_i32_add(struct wst st, int sp);
+
+int exec_i32_rem_u(struct wst st, int sp);

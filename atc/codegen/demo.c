@@ -16,3 +16,42 @@ int exec_local_set(struct wst st, int sp, int x) {
     sp = idx;
     return sp;
 }
+
+int exec_local_tee(struct wst st, int sp, int x) {
+    int idx = sp - 1;
+    unsigned int val = st.op[idx];
+    st.loc[x] = val;
+    return sp;
+}
+
+int exec_drop(struct wst st, int sp) {
+    return sp - 1;
+}
+
+int exec_i32_const(struct wst st, int sp, unsigned int n) {
+    st.op[sp] = n;
+    sp = sp + 1;
+    return sp;
+}
+
+int exec_i32_add(struct wst st, int sp) {
+    int i1 = sp - 2;
+    int i2 = sp - 1;
+    unsigned int v1 = st.op[i1];
+    unsigned int v2 = st.op[i2];
+    unsigned int r = v1 + v2;
+    st.op[i1] = r;
+    sp = i2;
+    return sp;
+}
+
+int exec_i32_rem_u(struct wst st, int sp) {
+    int i1 = sp - 2;
+    int i2 = sp - 1;
+    unsigned int v1 = st.op[i1];
+    unsigned int v2 = st.op[i2];
+    unsigned int r = v1 % v2;
+    st.op[i1] = r;
+    sp = i2;
+    return sp;
+}
