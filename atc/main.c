@@ -55,28 +55,21 @@ int main(int argc, char **argv) {
     if (load_wasm(wasm_path) < 0) return 1;
 
     struct wmod m = { 0 };
-    parse_header(&m);
+    parse_module(&m);
     if (m.err) {
-        fprintf(stderr, "wasm-vm1: not a WebAssembly binary (bad magic)\n");
+        fprintf(stderr, "wasm-vm1: parse error (err=%d)\n", m.err);
         return 1;
     }
 
-    /*
-     * When the real parser lands, export_name_matches() below will find the
-     * exported function and confirm it matches argv[2].  Until then, the
-     * module struct is mostly zero and we can't do the match, so we skip it
-     * during stub bring-up.  Uncomment once parse_module is wired in.
-     */
-    if (m.export_len != 0) {
-        if (!export_name_matches(&m, export_query)) {
-            fprintf(stderr, "wasm-vm1: export %s not found\n", export_query);
-            return 1;
-        }
+    if (!export_name_matches(&m, export_query)) {
+        fprintf(stderr, "wasm-vm1: export %s not found\n", export_query);
+        return 1;
     }
 
     unsigned int a = (unsigned int) strtoul(argv[3], NULL, 0);
     unsigned int b = (unsigned int) strtoul(argv[4], NULL, 0);
-    unsigned int r = invoke(&m, a, b);
+    struct wst st = { 0 };
+    unsigned int r = invoke(&st, &m, a, b);
     printf("%u\n", r);
     return 0;
 }

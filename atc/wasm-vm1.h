@@ -4,17 +4,27 @@ extern unsigned char wasm_buf[65536];
 
 struct wmod {
     unsigned char err;
-    unsigned int body_off;
-    unsigned int body_len;
+    int body_off;
+    int body_len;
     unsigned char num_params;
     unsigned char num_results;
     unsigned char num_locals;
-    unsigned int export_off;
+    int export_off;
     unsigned char export_len;
+};
+
+struct wst {
+    unsigned int op[64];
+    unsigned int loc[16];
+    int lpc[16];
+    int lsp[16];
+    unsigned char lkind[16];
 };
 
 int check_magic(void);
 
-void parse_header(struct wmod *m);
+void parse_module(struct wmod *m);
 
-unsigned int invoke(struct wmod *m, unsigned int a, unsigned int b);
+int scan_end(int pc);
+
+unsigned int invoke(struct wst *st, struct wmod *m, unsigned int a, unsigned int b);
