@@ -16,3 +16,5 @@ struct wmod {
 int check_magic(void);
 
 void parse_header(struct wmod *m);
+
+unsigned int invoke(struct wmod *m, unsigned int a, unsigned int b);

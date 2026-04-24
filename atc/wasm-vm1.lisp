@@ -103,11 +103,31 @@
         |m|))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Stub invoke: used while the full parser+interpreter is built out.
+;; Signature matches what the eventual real invoke will expose:
+;;
+;;    unsigned int invoke(struct wmod *m, unsigned int a, unsigned int b);
+;;
+;; For M1 stub, returns (a + b).  Real implementation will interpret the
+;; function body bytes stored in wasm_buf at m->body_off.
+
+(defun |invoke| (|m| |a| |b| |wasm_buf|)
+  (declare (xargs :guard (and (c::star (struct-|wmod|-p |m|))
+                              (c::uintp |a|)
+                              (c::uintp |b|)
+                              (object-|wasm_buf|-p |wasm_buf|))
+                  :guard-hints (("Goal"
+                                 :in-theory (enable object-|wasm_buf|-p)))))
+  (declare (ignore |m| |wasm_buf|))
+  (c::add-uint-uint |a| |b|))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (c::atc |wasm_buf|
         |wmod|
         |check_magic|
         |parse_header|
+        |invoke|
         :file-name "wasm-vm1"
         :header t
         :proofs nil)

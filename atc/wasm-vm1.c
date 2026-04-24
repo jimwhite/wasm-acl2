@@ -16,3 +16,7 @@ void parse_header(struct wmod *m) {
         m->err = (unsigned char) 1;
     }
 }
+
+unsigned int invoke(struct wmod *m, unsigned int a, unsigned int b) {
+    return a + b;
+}
