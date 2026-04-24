@@ -2,16 +2,32 @@
 
 A small code generator that takes the operational WASM semantics in
 [../../execution.lisp](../../execution.lisp) as-is and, for each
-operation it understands, emits a standalone ATC-fragment step
-function plus its C translation.
+operation it understands, emits two artifacts:
 
-No new DSL. No edits to `execution.lisp`. The generator is a
-*template family*: for each structural shape occurring in the spec
-there is one emitter macro, and the per-op work is one line.
+1. A standalone per-op **step function** in C.
+2. An opcode-dispatched **execution loop** in C that inlines all
+   arms around a shared set of scalar registers.
+
+Both come from one source of truth: a *template family* indexed by
+structural shape. There is one emitter per shape, and the per-op
+work is one line regardless of which artifact is being produced.
+
+No new DSL. No edits to `execution.lisp`.
 
 ## Status
 
-Today: seven operations generated end-to-end, six template shapes.
+Today: seven operations generated end-to-end, six template shapes,
+plus a generated opcode-dispatch loop wired to the hand-written
+`.wasm` parser and driven by `wat2wasm`-compiled WebAssembly.
+
+**Running example** (see [End-to-end](#end-to-end-running-a-real-wasm-through-the-generated-loop) below):
+
+```
+$ wat2wasm addmod.wat -o addmod.wasm
+$ ./run_demo addmod.wasm addmod 30 10   → 40   (= (30+10) %% 50)
+$ ./run_demo addmod.wasm addmod 49 49   → 48   (= 98 %% 50)
+```
+
 
 | Spec                      | Shape                         | Generated ACL2        | Generated C         |
 |---------------------------|-------------------------------|-----------------------|---------------------|
@@ -28,6 +44,69 @@ operator and so covers `add`/`sub`/`mul`/`and`/`or`/`xor` with a
 single additional line each. The `:i32-binop-nz` shape hoists the
 divisor-nonzero trap into the ACL2 guard (via the op's `-okp`
 predicate) and covers `div_u`/`rem_u` in one line each.
+
+### Execution loop
+
+The same shape-tag vocabulary drives a dispatcher generator
+([loop.lisp](loop.lisp), [loop-demo.lisp](loop-demo.lisp)) that
+emits an opcode-dispatched step-until-halt loop as a single C
+function. Each arm is inlined (ATC passes structs by value, so
+calling the per-op step functions from the loop would not mutate
+the caller's state) but every arm body is emitted from the same
+per-shape template that drives the standalone generator — one
+source of truth per shape.
+
+The 8-op demo (end, drop, local.get/set/tee, i32.const, i32.add,
+i32.rem_u) is driven by this table:
+
+```lisp
+(gen-exec-loop
+  |exec_loop|
+  (:end-toplevel    #x0b)
+  (:drop            #x1a)
+  (:local-idx-pusher #x20)
+  (:local-idx-popper #x21)
+  (:local-idx-teer   #x22)
+  (:i32-const        #x41)
+  (:i32-binop-total  #x6a c::add-uint-uint)   ; i32.add
+  (:i32-binop-nz     #x70 c::rem-uint-uint))  ; i32.rem_u
+```
+
+and produces [loop-demo.c](loop-demo.c) containing a single
+`exec_run(struct wst *st, int pc)` C function that initializes
+`sp/nl/halted/fuel` and drives a `while (halted == 0 && fuel > 0
+&& pc < 59998)` dispatch. Compare to the ~650 hand-written lines
+covering this same set in [`../wasm-vm1.lisp`](../wasm-vm1.lisp)
+`|exec$loop|`.
+
+Shape of the generated dispatcher (excerpt):
+
+```c
+void exec_run(struct wst *st, int pc) {
+    int sp = 0;
+    int nl = 0;
+    int halted = 0;
+    int fuel = 100000;
+    while (halted == 0 && fuel > 0 && pc < 59998) {
+        int b = (int) wasm_buf[pc];
+        if (b == 11) {                // end: halt
+            halted = 1;
+            fuel = fuel - 1;
+        } else { if (b == 26) {       // drop
+            int ok = sp > 0;
+            sp = ok ? sp - 1 : sp;
+            pc = pc + 1;
+            halted = ok ? halted : 1;
+            fuel = fuel - 1;
+        } else { ... } }
+    }
+}
+```
+
+ATC emits only `if`/`else` — it does not generate `switch`
+statements. The resulting else-cascade is deeply nested in source
+form; `clang-format` or a trivial post-pass can flatten `else { if
+… }` into `else if …` for readability.
 
 The generated C, as emitted by ATC into [demo.c](demo.c):
 
@@ -97,14 +176,216 @@ in the ACL2 guard, not in the body.
 Build: `make -j$(nproc) demo` (from this directory — uses
 `/home/acl2/books/build/cert.pl`).
 
+## End-to-end: running a real `.wasm` through the generated loop
+
+[integration-demo.lisp](integration-demo.lisp) wires the generated
+`|exec_loop_gen|` to the hand-written `.wasm` reader in
+[../wasm-vm1.lisp](../wasm-vm1.lisp). The pipeline is:
+
+```
+    main.c → fread → wasm_buf[65536]
+                │
+                ▼
+          parse_module         (hand-written, emitted by ATC from wasm-vm1.lisp)
+                │  fills |wmod|: body_off, body_len, num_locals,
+                │                export_off, export_len, ...
+                ▼
+          run_wasm_gen         (GENERATED; defined in integration-demo.lisp)
+                │  seeds st->loc[0..1] with the two u32 arguments,
+                │  then drives exec_loop_gen (8-opcode dispatch),
+                │  then returns st->op[0].
+                ▼
+             uint result
+```
+
+`c::atc` emits these three C functions plus the loop body (inlined into
+`run_wasm_gen` as a `while`) into [run.c](run.c) / [run.h](run.h).
+[run_main.c](run_main.c) is the CLI driver (same arg convention as
+`../main.c`):
+
+```
+$ cd atc/codegen
+$ gcc -O2 -o run_demo run.c run_main.c
+$ wat2wasm addmod.wat -o addmod.wasm
+$ ./run_demo addmod.wasm addmod 30 10    # (30+10) %% 50 = 40
+40
+$ ./run_demo addmod.wasm addmod 100 50   # (100+50) %% 50 = 0
+0
+$ ./run_demo addmod.wasm addmod 49 49    # (98) %% 50 = 48
+48
+```
+
+[addmod.wat](addmod.wat) is a straight-line example using exactly the 8
+opcodes the current generator covers (`local.get`, `i32.add`,
+`i32.const`, `i32.rem_u`, `end`). `wat2wasm` is available at
+`tools/node_modules/.bin/wat2wasm`.
+
+Two additional drivers exist for regression / isolation work:
+
+- [run_sanity.c](run_sanity.c) — bypasses `parse_module` and injects a
+  hand-crafted bytecode body directly into `wasm_buf`. Useful for
+  exercising the generated loop without going through the parser
+  (`./run_sanity add 3 4 → 7`, `./run_sanity rem_u 17 0 → 0` demonstrating
+  the trap-to-halt path, etc.).
+- The hand-written `../wasm-vm1` binary takes the same CLI and implements
+  a different opcode subset (block / br_if / eqz for gcd), so the two
+  can be diffed on fixtures that fall inside both vocabularies.
+
+Known caveat exercised by the demo: the generated `:i32-const` arm reads
+a **one-byte** immediate, not LEB128. For constants that fit in a signed
+single LEB byte (<= 63) the encoding coincides; larger constants need
+either (a) a multi-byte LEB reader template (straightforward follow-up)
+or (b) modelling the immediate as two separate spec ops. Same simplification
+applies to `:local-idx-*` which currently read the index as a single
+byte (fine for the 16-local state we've fixed).
+
 ## Files
 
-| File                   | Role                                                        |
-|------------------------|-------------------------------------------------------------|
-| [state-model.lisp](state-model.lisp) | The one concrete state struct `|wst|` (op[64], loc[16]). Shared by every generated op. |
-| [templates.lisp](templates.lisp)     | The template-family emitters. One `gen-<shape>` macro per structural shape in the spec. |
-| [demo.lisp](demo.lisp)               | Uses the generator for `local.get` and `local.set`, then invokes `c::atc` on the result. |
-| [cert.acl2](cert.acl2)               | Portcullis: ACL2 package + ATC ttags.                        |
+| File                                     | Role                                                                                     |
+|------------------------------------------|------------------------------------------------------------------------------------------|
+| [state-model.lisp](state-model.lisp)     | The one concrete state struct `|wst|` (op[64], loc[16]). Shared by every generated op.   |
+| [standalone-state.lisp](standalone-state.lisp) | Non-local re-export of the `sint-max` linear rule + standalone `|wasm_buf|` defobject. Used by demos that don't include `wasm-vm1`. |
+| [templates.lisp](templates.lisp)         | Per-shape emitters for standalone C step functions (`gen-local-idx-pusher`, …).          |
+| [demo.lisp](demo.lisp)                   | Uses step-function emitters for 7 ops, then `c::atc` → [demo.c](demo.c).                 |
+| [loop.lisp](loop.lisp)                   | Per-shape emitters for **arms** spliced into a generated opcode-dispatch loop.           |
+| [loop-demo.lisp](loop-demo.lisp)         | Uses loop emitters for 8 opcodes plus `|exec_run|` entry, then `c::atc` → [loop-demo.c](loop-demo.c). |
+| [integration-demo.lisp](integration-demo.lisp) | Wires generated loop to hand-written parser from `../wasm-vm1.lisp`; emits [run.c](run.c) / [run.h](run.h). |
+| [run_main.c](run_main.c)                 | CLI driver: fread → parse_module → run_wasm_gen → print.                                 |
+| [run_sanity.c](run_sanity.c)             | Hand-crafted bytecode injector; exercises the generated loop without `parse_module`.      |
+| [addmod.wat](addmod.wat)                 | Smallest end-to-end WAT using only the 8 supported opcodes.                              |
+| [cert.acl2](cert.acl2)                   | Portcullis: ACL2 package + ATC ttags.                                                    |
+
+## Gotchas (lessons from building this)
+
+These are ATC/ACL2 rules that cost time to rediscover. All are
+addressed in the current code; they're listed here so the next
+person — or the next shape — doesn't re-trip them.
+
+1. **ATC C identifier rule.** Generated function names must be
+   portable ASCII C identifiers — no dots, no dashes. Use
+   underscores: `|exec_local_get|`, not `|exec-local.get|` or
+   `|exec.local.get|`.
+
+2. **`mv-return` rule for scalars.** If a function returns `(mv st
+   sp)` and the second value is a `sintp` scalar, ATC rejects it:
+   non-first `mv` values must be pointer/array formals. The
+   standalone step functions return just the new `sp` and "mutate"
+   the struct by shadowing the `let*`-bound variable.
+
+3. **Recursive targets need a non-recursive caller.** ATC will
+   refuse a `c::atc` form whose only recursive target function is
+   not called from another target. [loop-demo.lisp](loop-demo.lisp)
+   introduces a trivial non-recursive `|exec_run|` that
+   initializes scalar registers and calls `|exec_loop|`; ATC
+   translates `|exec_loop|` into a `while` inlined inside
+   `exec_run`.
+
+4. **Scalar mutation in a recursive loop requires mv-return.** The
+   loop's scalar formals (`sp`, `pc`, `halted`, `fuel`) are only
+   treated as assignable OUT parameters by ATC when the function
+   returns `(mv st sp nl pc halted fuel)`. Returning just `st` and
+   writing `(|halted| (c::assign …))` produces "attempt to modify a
+   non-assignable variable." The arms still look like in-place
+   assignments in ACL2 source; ATC handles the mv packaging.
+
+5. **Local rules don't survive `include-book`.** A linear rule
+   `(>= (c::sint-max) 65600)` declared with `defrulel` in
+   [state-model.lisp](state-model.lisp) is not visible inside a
+   book that `include-book`s it. Use `defrule` (non-local) in any
+   book whose guard proofs depend on the concrete `sint-max`
+   bound. [loop.lisp](loop.lisp) re-declares it non-locally.
+
+6. **`declare ignore` on program-mode helpers.** `xargs :mode
+   :program` still enforces the "every formal must be used or
+   declared ignored" rule at defun time. In [loop.lisp](loop.lisp),
+   `emit-pc-halted-fuel` takes `loop-name` only for interface
+   symmetry with other arm emitters and needs `(declare (ignore
+   loop-name))`.
+
+7. **No `switch`-statement generation.** ATC emits only nested
+   `if`/`else` (its underlying C AST supports `switch`, but the
+   ACL2-to-C translator does not). The dispatcher C is a deeply
+   nested else-cascade; `clang-format` or a trivial post-pass can
+   flatten `else { if … }` into `else if …` if you need it for
+   reading.
+
+8. **Caller guard proofs need a struct-preservation lemma for the
+   loop.** When `|run_wasm_gen|` (or any caller) uses `mv-let` to
+   destructure the loop's return and then writes through the
+   returned `|st|`, ATC's guard generator has to know that
+   `(mv-nth 0 (|exec_loop_gen| ...))` is still a `struct-|wst|-p`.
+   The inductive proof doesn't come for free from the loop's defun.
+   [integration-demo.lisp](integration-demo.lisp) adds:
+
+   ```lisp
+   (defrulel struct-wst-p-of-mv-nth-0-exec_loop_gen
+     (implies (struct-|wst|-p |st|)
+              (struct-|wst|-p
+               (mv-nth 0 (|exec_loop_gen| |st| |sp| |nl| |pc| |halted|
+                                          |fuel| |wasm_buf|))))
+     :induct (|exec_loop_gen| |st| |sp| |nl| |pc| |halted| |fuel|
+                              |wasm_buf|)
+     :enable (|exec_loop_gen|))
+   ```
+
+   This mirrors `struct-wst-p-of-mv-nth-0-exec$loop` in
+   [../wasm-vm1.lisp](../wasm-vm1.lisp). Without it, guard
+   verification for the caller fails with checkpoints like
+   `(STRUCT-wst-P (MV-NTH 0 (|exec_loop_gen| ...)))`. A future
+   enhancement is for `gen-exec-loop` to emit this lemma
+   automatically alongside the defun.
+
+9. **`:i32-const` and `:local-idx-*` read one-byte immediates, not
+   LEB128.** The current arms do `byte-at(pc+1)` and advance `pc`
+   by a fixed 2. For constants/indices that fit in a signed single
+   LEB byte (≤ 63 for `i32.const`, ≤ 15 for `local.*`) the encoding
+   coincides with raw bytes, and `wat2wasm` produces the expected
+   bytecode. For larger constants, a multi-byte LEB reader template
+   is a straightforward follow-up. The 16-local bound is already
+   enforced by `|wst|` (`loc[16]`), so the 1-byte index is not a
+   footgun there.
+
+10. **`c::atc` target lists must cover the full call graph.** If
+    `|run_wasm_gen|` calls both `|exec_loop_gen|` and (indirectly,
+    via the caller) `parse_module`, all three — plus every
+    recursively-tail-called helper like `|parse$loop|` — must be
+    listed as targets in the `c::atc` form. ATC accepts a target
+    function that is already declared elsewhere as long as its
+    body matches; listing it twice (here and in the upstream
+    wasm-vm1 `c::atc`) is fine.
+
+## Adding a new shape
+
+For a new operation whose spec doesn't fit an existing shape, add one
+template macro to [templates.lisp](templates.lisp) (for the
+standalone step function) and one arm emitter to
+[loop.lisp](loop.lisp) (for the dispatched loop), then one dispatch
+entry in each of `gen-exec-op` / `emit-arm`. Existing templates to
+copy from:
+
+- **Stack-only shapes** (no immediate): `:drop`, `:i32-binop-total`,
+  `:i32-binop-nz`.
+- **Immediate shapes**: `:i32-const` (u32), `:local-idx-pusher` /
+  `:local-idx-popper` / `:local-idx-teer` (local index),
+  `:end-toplevel`.
+- **Parameterized shapes**: `:i32-binop-total` takes the ATC op
+  symbol (`c::add-uint-uint`, `c::mul-uint-uint`, …);
+  `:i32-binop-nz` additionally takes the op's `-okp` predicate.
+
+Most of `execution.lisp` fits into shapes of this kind. Future
+additions likely needed:
+
+- `:i32-unop` — `clz`/`ctz`/`popcnt`/`eqz` (one pop, one push).
+- `:i32-relop` — `eq`/`ne`/`lt_u`/`lt_s`/… (two pops, push 0/1).
+- `:i32-shift` — like binop-total but the rhs is masked `% 32`.
+- `:i32-binop-signed` / `:i32-binop-signed-nz` — for `div_s`/`rem_s`.
+- `:global-get-set` — straightforward pusher/popper over a separate
+  `glob[]` array added to `|wst|`.
+- `:i64-*` — same shapes re-instantiated for 64-bit.
+- `:block` / `:loop` / `:br` / `:br_if` — label-stack ops. The
+  dispatcher layer already has `|nl|` / `|lpc|` / `|lsp|` / `|lkind|`
+  ready from [../wasm-vm1.lisp](../wasm-vm1.lisp); the arms would
+  follow the same `ok`-gating discipline as the step shapes.
 
 ## How the generator maps spec → ATC
 
@@ -165,13 +446,17 @@ later step but is not necessary for the code-generation job.
 ## Adding a new shape
 
 For a new operation whose spec doesn't fit an existing shape, add one
-template macro to [templates.lisp](templates.lisp) and one dispatch
-entry to `gen-exec-op`. Existing templates to copy from:
+template macro to [templates.lisp](templates.lisp) (for the
+standalone step function) and one arm emitter to
+[loop.lisp](loop.lisp) (for the dispatched loop), then one dispatch
+entry in each of `gen-exec-op` / `emit-arm`. Existing templates to
+copy from:
 
 - **Stack-only shapes** (no immediate): `:drop`, `:i32-binop-total`,
   `:i32-binop-nz`.
 - **Immediate shapes**: `:i32-const` (u32), `:local-idx-pusher` /
-  `:local-idx-popper` / `:local-idx-teer` (local index).
+  `:local-idx-popper` / `:local-idx-teer` (local index),
+  `:end-toplevel`.
 - **Parameterized shapes**: `:i32-binop-total` takes the ATC op
   symbol (`c::add-uint-uint`, `c::mul-uint-uint`, …);
   `:i32-binop-nz` additionally takes the op's `-okp` predicate.
@@ -186,10 +471,10 @@ additions likely needed:
 - `:global-get-set` — straightforward pusher/popper over a separate
   `glob[]` array added to `|wst|`.
 - `:i64-*` — same shapes re-instantiated for 64-bit.
-
-Control-flow (`block`/`loop`/`br`/`br_if`/`end`/`call`) does not fit
-the "one step per op, no dispatch" abstraction and belongs to the
-dispatcher layer, not this generator.
+- `:block` / `:loop` / `:br` / `:br_if` — label-stack ops. The
+  dispatcher layer already has `|nl|` / `|lpc|` / `|lsp|` / `|lkind|`
+  ready from [../wasm-vm1.lisp](../wasm-vm1.lisp); the arms would
+  follow the same `ok`-gating discipline as the step shapes.
 
 ## What this proves about the original concern
 
@@ -202,21 +487,19 @@ plumbing is completely absent from the spec, so the shape drift
 between spec and implementation was ~40 lines per op.
 
 A spec-driven generator factors out the plumbing (it lives in the
-dispatcher, once) and makes each op's C a small, one-purpose
-function that visibly mirrors the corresponding `execute-<op>` in
-the spec. The demo here shows that at the ATC-fragment level *and*
-at the emitted-C level the two can be put in one-to-one
-correspondence mechanically.
+template, once) and makes each op's C a small, one-purpose function
+that visibly mirrors the corresponding `execute-<op>` in the spec.
+The loop generator shows the same factoring scales the other way:
+one table row per opcode, one arm emitter per shape, and the whole
+~650-line hand-written dispatcher collapses to a ~110-line C
+function with the same operational content.
 
-## Known limitation
+## Struct calling conventions (informational)
 
-The emitted C takes `struct wst st` by value (top-level functions
-with struct parameters get by-value calling convention from ATC when
-they are not called from other generated code). Mutations to `st`
-inside the generated function therefore don't propagate to a caller.
-When these step functions are composed into a dispatcher — either a
-hand-written C dispatcher or another ATC-generated one — the caller
-holds `st` as a local variable and passes its address; ATC then
-emits `struct wst *st` for the callee automatically. The ACL2-level
-semantics (shadowed `st` binding in `let*`) is already correct; only
-the C calling-convention shape changes when composition is wired up.
+The standalone step functions in [demo.c](demo.c) take `struct wst
+st` *by value*; the loop entry `exec_run` in [loop-demo.c](loop-demo.c)
+takes `struct wst *st`. That difference is purely ATC calling
+convention: top-level target functions with struct parameters are
+by-value if they're not called by another target, and by-pointer if
+they are. The ACL2 source is the same (`let*`-shadowed `st`);
+composition order chooses the C ABI.

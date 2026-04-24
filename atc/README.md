@@ -96,6 +96,7 @@ Both are planned follow-ons.
 | [main.c](main.c)               | Hand-written driver: reads `.wasm` off disk, finds the export, calls `invoke`. |
 | [cert.acl2](cert.acl2)         | `certify-book` portcullis commands for ATC.   |
 | `wasm-vm1.cert` / `.fasl` / `.port` | ACL2 certification artifacts.            |
+| [codegen/](codegen/)           | Spec-driven generator that emits ATC-ready step functions and an opcode-dispatch loop from shape tags, plus an end-to-end demo that wires the generated loop to the hand-written `.wasm` parser. See [codegen/README.md](codegen/README.md). |
 
 Build:
 
