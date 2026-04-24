@@ -1,2 +1,6 @@
 # Demo binary
 run_demo
+run_sanity
+
+# Generated .wasm files
+*.wasm
