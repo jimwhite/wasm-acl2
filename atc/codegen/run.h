@@ -27,4 +27,6 @@ void parse_module(struct wmod *m);
 
 int scan_end(int pc);
 
+int scan_else(int pc);
+
 unsigned int run_wasm_gen(struct wst *st, struct wmod *m, unsigned int a, unsigned int b);

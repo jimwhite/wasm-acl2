@@ -437,7 +437,9 @@
                         (c::boolean-from-sint
                          (c::eq-sint-sint |b| (c::sint-dec-const #x21)))
                         (c::boolean-from-sint
-                         (c::eq-sint-sint |b| (c::sint-dec-const #x22)))))))
+                         (c::eq-sint-sint |b| (c::sint-dec-const #x22)))
+                        (c::boolean-from-sint
+                         (c::eq-sint-sint |b| (c::sint-dec-const #x41)))))))
                  (|depth|
                   (c::assign
                    (c::condexpr
@@ -500,6 +502,244 @@
         (|scan$loop| |pc| |depth| |fuel| |wasm_buf|)
       (declare (ignore |depth| |fuel|))
       |pc|)))
+
+;; ---- scan_else: find the matching `else' (0x05) at depth 1.  ----
+;; Used by the :if arm's codegen to compute the jump target when the
+;; condition is false and the if-block contains an else-branch.
+;; Returns: pc+1 of the 0x05 byte if found, 0 if the matching end
+;; was reached first (no else).  Same fuel / depth discipline as
+;; scan$loop; also aware of the 0x41 (i32.const) 2-byte size.
+
+(defun |scan_else$loop| (|pc| |depth| |fuel| |wasm_buf|)
+  (declare (xargs
+    :guard (and (c::sintp |pc|)
+                (c::sintp |depth|)
+                (c::sintp |fuel|)
+                (object-|wasm_buf|-p |wasm_buf|)
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (<= 0 (c::integer-from-sint |depth|))
+                (<= (c::integer-from-sint |depth|) 4096)
+                (<= 0 (c::integer-from-sint |fuel|))
+                (<= (c::integer-from-sint |fuel|) 4096))
+    :guard-hints
+    (("Goal"
+      :in-theory
+      (enable object-|wasm_buf|-p
+              c::uchar-array-index-okp
+              c::integer-from-cinteger-alt-def
+              c::sint-from-uchar-okp-when-uchar-max-<=-sint-max
+              c::uchar-max-vs-sint-max
+              c::add-sint-sint
+              c::add-sint-sint-okp
+              c::sub-sint-sint
+              c::sub-sint-sint-okp
+              c::sint-integerp-alt-def
+              c::integer-from-sint-of-sint-from-uchar
+              c::integer-from-uchar-upper-bound
+              c::eq-sint-sint
+              c::gt-sint-sint
+              c::lt-sint-sint
+              c::le-sint-sint
+              c::declar
+              c::assign
+              c::condexpr)))
+    :measure (nfix (c::integer-from-sint |fuel|))
+    :hints (("Goal"
+             :in-theory
+             (enable c::gt-sint-sint
+                     c::sub-sint-sint
+                     c::sint-integerp-alt-def
+                     c::assign
+                     c::condexpr)))))
+  (if (mbt (and (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (<= 0 (c::integer-from-sint |depth|))
+                (<= (c::integer-from-sint |depth|) 4096)
+                (<= 0 (c::integer-from-sint |fuel|))
+                (<= (c::integer-from-sint |fuel|) 4096)))
+      (if (c::boolean-from-sint
+           (c::sint-from-boolean
+            (and (c::boolean-from-sint
+                  (c::gt-sint-sint |depth| (c::sint-dec-const 0)))
+                 (c::boolean-from-sint
+                  (c::gt-sint-sint |fuel| (c::sint-dec-const 0)))
+                 (c::boolean-from-sint
+                  (c::lt-sint-sint |pc| (c::sint-dec-const 59998)))
+                 (c::boolean-from-sint
+                  (c::lt-sint-sint |depth| (c::sint-dec-const 4095))))))
+          (let* ((|b| (c::declar (byte-at |pc|)))
+                 (|is_else_here|
+                  (c::declar
+                   (c::sint-from-boolean
+                    (and (c::boolean-from-sint
+                          (c::eq-sint-sint |b| (c::sint-dec-const #x05)))
+                         (c::boolean-from-sint
+                          (c::eq-sint-sint |depth|
+                                           (c::sint-dec-const 1)))))))
+                 (|is_open|
+                  (c::declar
+                   (c::sint-from-boolean
+                    (or (c::boolean-from-sint
+                         (c::eq-sint-sint
+                          |b| (c::sint-dec-const #x02)))
+                        (c::boolean-from-sint
+                         (c::eq-sint-sint
+                          |b| (c::sint-dec-const #x03)))
+                        (c::boolean-from-sint
+                         (c::eq-sint-sint
+                          |b| (c::sint-dec-const #x04)))))))
+                 (|is_end|
+                  (c::declar
+                   (c::eq-sint-sint
+                    |b| (c::sint-dec-const #x0b))))
+                 (|is_end_at_1|
+                  (c::declar
+                   (c::sint-from-boolean
+                    (and (c::boolean-from-sint |is_end|)
+                         (c::boolean-from-sint
+                          (c::eq-sint-sint
+                           |depth| (c::sint-dec-const 1)))))))
+                 (|is_wide|
+                  (c::declar
+                   (c::sint-from-boolean
+                    (or (c::boolean-from-sint |is_open|)
+                        (c::boolean-from-sint
+                         (c::eq-sint-sint
+                          |b| (c::sint-dec-const #x0c)))
+                        (c::boolean-from-sint
+                         (c::eq-sint-sint
+                          |b| (c::sint-dec-const #x0d)))
+                        (c::boolean-from-sint
+                         (c::eq-sint-sint
+                          |b| (c::sint-dec-const #x20)))
+                        (c::boolean-from-sint
+                         (c::eq-sint-sint
+                          |b| (c::sint-dec-const #x21)))
+                        (c::boolean-from-sint
+                         (c::eq-sint-sint
+                          |b| (c::sint-dec-const #x22)))
+                        (c::boolean-from-sint
+                         (c::eq-sint-sint
+                          |b| (c::sint-dec-const #x41)))))))
+                 ;; Next pc: pc+1 if else found, 0 if end-at-1, else advance.
+                 (|pc|
+                  (c::assign
+                   (c::condexpr
+                    (if (c::boolean-from-sint |is_else_here|)
+                        (c::add-sint-sint |pc| (c::sint-dec-const 1))
+                      (c::condexpr
+                       (if (c::boolean-from-sint |is_end_at_1|)
+                           (c::sint-dec-const 0)
+                         (c::condexpr
+                          (if (c::boolean-from-sint |is_wide|)
+                              (c::add-sint-sint
+                               |pc| (c::sint-dec-const 2))
+                            (c::add-sint-sint
+                             |pc| (c::sint-dec-const 1))))))))))
+                 ;; Next depth: 0 (exit) if else found or end-at-1;
+                 ;; else track bracket balance.
+                 (|depth|
+                  (c::assign
+                   (c::condexpr
+                    (if (c::boolean-from-sint
+                         (c::sint-from-boolean
+                          (or (c::boolean-from-sint |is_else_here|)
+                              (c::boolean-from-sint |is_end_at_1|))))
+                        (c::sint-dec-const 0)
+                      (c::condexpr
+                       (if (c::boolean-from-sint |is_open|)
+                           (c::add-sint-sint
+                            |depth| (c::sint-dec-const 1))
+                         (c::condexpr
+                          (if (c::boolean-from-sint |is_end|)
+                              (c::sub-sint-sint
+                               |depth| (c::sint-dec-const 1))
+                            |depth|))))))))
+                 (|fuel|
+                  (c::assign
+                   (c::sub-sint-sint |fuel| (c::sint-dec-const 1)))))
+            (|scan_else$loop| |pc| |depth| |fuel| |wasm_buf|))
+        (mv |pc| |depth| |fuel|))
+    (mv nil nil nil)))
+
+(defrulel sintp-of-mv-nth-0-scan_else$loop
+  (implies (and (c::sintp |pc|)
+                (c::sintp |depth|)
+                (c::sintp |fuel|)
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (<= 0 (c::integer-from-sint |depth|))
+                (<= (c::integer-from-sint |depth|) 4096)
+                (<= 0 (c::integer-from-sint |fuel|))
+                (<= (c::integer-from-sint |fuel|) 4096))
+           (c::sintp (mv-nth 0 (|scan_else$loop|
+                                |pc| |depth| |fuel| |wasm_buf|))))
+  :induct (|scan_else$loop| |pc| |depth| |fuel| |wasm_buf|)
+  :enable (|scan_else$loop|
+           c::add-sint-sint
+           c::sub-sint-sint
+           c::gt-sint-sint
+           c::lt-sint-sint
+           c::eq-sint-sint
+           c::boolean-from-sint
+           c::sint-from-boolean
+           c::sint-integerp-alt-def
+           c::declar
+           c::assign
+           c::condexpr))
+
+(defrulel sintp-of-mv-nth-1-scan_else$loop
+  (implies (and (c::sintp |pc|)
+                (c::sintp |depth|)
+                (c::sintp |fuel|)
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (<= 0 (c::integer-from-sint |depth|))
+                (<= (c::integer-from-sint |depth|) 4096)
+                (<= 0 (c::integer-from-sint |fuel|))
+                (<= (c::integer-from-sint |fuel|) 4096))
+           (c::sintp (mv-nth 1 (|scan_else$loop|
+                                |pc| |depth| |fuel| |wasm_buf|))))
+  :induct (|scan_else$loop| |pc| |depth| |fuel| |wasm_buf|)
+  :enable (|scan_else$loop|
+           c::add-sint-sint
+           c::sub-sint-sint
+           c::gt-sint-sint
+           c::lt-sint-sint
+           c::eq-sint-sint
+           c::boolean-from-sint
+           c::sint-from-boolean
+           c::sint-integerp-alt-def
+           c::declar
+           c::assign
+           c::condexpr))
+
+(defun |scan_else| (|pc| |wasm_buf|)
+  (declare (xargs
+    :guard (and (c::sintp |pc|)
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (object-|wasm_buf|-p |wasm_buf|))
+    :guard-hints
+    (("Goal" :in-theory (enable object-|wasm_buf|-p
+                                c::declar c::sint-integerp-alt-def
+                                c::eq-sint-sint
+                                c::boolean-from-sint
+                                c::condexpr)))))
+  (let* ((|depth| (c::declar (c::sint-dec-const 1)))
+         (|fuel|  (c::declar (c::sint-dec-const 4096))))
+    (mv-let (|pc| |depth| |fuel|)
+        (|scan_else$loop| |pc| |depth| |fuel| |wasm_buf|)
+      (declare (ignore |fuel|))
+      ;; Loop exits with depth = 0 on success (else found: pc=pc+1;
+      ;; end-at-1: pc=0).  Any other depth means fuel/boundary
+      ;; exhaustion — treat as "no else".
+      (c::condexpr
+       (if (c::boolean-from-sint
+            (c::eq-sint-sint |depth| (c::sint-dec-const 0)))
+           |pc|
+         (c::sint-dec-const 0))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Real interpreter.

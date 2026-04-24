@@ -16,10 +16,11 @@ No new DSL. No edits to `execution.lisp`.
 
 ## Status
 
-Today: **thirteen opcodes** generated end-to-end through a shared template
-family of nine shapes, wired to the hand-written `.wasm` parser, driven by
-real `wat2wasm`-compiled WebAssembly. Straight-line *and* branching
-programs run through the same dispatch loop.
+Today: **eighteen opcodes** generated end-to-end through a shared template
+family of thirteen shapes, wired to the hand-written `.wasm` parser, driven
+by real `wat2wasm`-compiled WebAssembly. Straight-line, branching, *and*
+if/else-with-scan programs (gcd, factorial, is_prime, collatz) all run
+through the same dispatch loop.
 
 **Running examples** (see [End-to-end](#end-to-end-running-a-real-wasm-through-the-generated-loop) below):
 
@@ -28,13 +29,17 @@ $ wat2wasm addmod.wat -o addmod.wasm
 $ ./run_demo addmod.wasm addmod 30 10         → 40    (= (30+10) %% 50)
 $ ./run_demo addmod.wasm addmod 49 49         → 48    (= 98 %% 50)
 
-$ ./run_demo ../../tests/oracle/gcd.wasm gcd 48 18            → 6
-$ ./run_demo ../../tests/oracle/gcd.wasm gcd 100 25           → 25
-$ ./run_demo ../../tests/oracle/gcd.wasm gcd 17 13            → 1
-$ ./run_demo ../../tests/oracle/gcd.wasm gcd 1000000 999983   → 1
+$ ./run_demo ../../tests/oracle/gcd.wasm        gcd       48 18        → 6
+$ ./run_demo ../../tests/oracle/gcd.wasm        gcd       1000000 999983 → 1
+$ ./run_demo ../../tests/oracle/factorial.wasm  factorial 5  0          → 120
+$ ./run_demo ../../tests/oracle/factorial.wasm  factorial 10 0          → 3628800
+$ ./run_demo ../../tests/oracle/is_prime.wasm   is_prime  7  0          → 1
+$ ./run_demo ../../tests/oracle/is_prime.wasm   is_prime  9  0          → 0
+$ ./run_demo ../../tests/oracle/collatz.wasm    collatz   27 0          → 111
+$ ./run_demo ../../tests/oracle/collatz.wasm    collatz   97 0          → 118
 ```
 
-All gcd results match the hand-written reference (`../wasm-vm1` binary).
+All results match the published oracle / hand-written reference.
 
 ### Template shapes and opcodes covered
 
@@ -53,14 +58,27 @@ All gcd results match the hand-written reference (`../wasm-vm1` binary).
 | `wasm::execute-end` `0x0b`            | `:end` or `:end-toplevel`     | `:end` pops a label (non-toplevel); toplevel halts |
 | `wasm::execute-br` `0x0c`             | `:br`                         | unconditional branch by depth                    |
 | `wasm::execute-br_if` `0x0d`          | `:br-if`                      | conditional branch (shares emitter w/ `:br`)     |
+| `wasm::execute-if` `0x04`             | `:if`                         | calls `scan_end` + `scan_else`; pushes label iff cond-true or else-present |
+| `wasm::execute-else` `0x05`           | `:else`                       | pops the label pushed by `:if` and jumps to `scan_end(pc+1)` |
+| `wasm::execute-return` `0x0f`         | `:return`                     | halts the loop                                   |
+| `wasm::execute-i32.{eq,ne,lt_u,gt_u,le_u,ge_u}` `0x46..0x4f` | `:i32-relop` + uint-relop | parameterized over `c::lt-uint-uint` etc.; pushes `uint-from-sint` |
+| `wasm::execute-i32.div_u` `0x6d`      | `:i32-binop-nz` + uint-op     | second `0x6d` client of the div/rem shape        |
+| `wasm::execute-i32.{sub,mul}` `0x6b,0x6c` | `:i32-binop-total` + uint-op | additional clients of the binop-total shape      |
 
 The `:i32-binop-total` shape is parameterized by the ATC uint operator and
 covers `add`/`sub`/`mul`/`and`/`or`/`xor` at one line each. `:i32-binop-nz`
 hoists the divisor-nonzero trap into the ACL2 guard and covers `div_u`/
-`rem_u` similarly. `:br` and `:br-if` share one emitter (`emit-arm-br`)
-parameterized by an `is-conditional` flag — the only difference is three
-extra bindings for the stack-top check, spliced in conditionally so the
-translated C for `:br` has no dead code (ATC's ignore-formal rule).
+`rem_u` similarly. `:i32-relop` is parameterized by the signed-sint
+relop and wraps the sint result in `uint-from-sint` to push WASM's 0/1 `i32`.
+`:br` and `:br-if` share one emitter (`emit-arm-br`) parameterized by an
+`is-conditional` flag — the only difference is three extra bindings for
+the stack-top check, spliced in conditionally so the translated C for `:br`
+has no dead code (ATC's ignore-formal rule). `:if` is the most complex
+arm: it calls both `scan_end(pc+2)` and `scan_else(pc+2)`; if
+`scan_else` reports no else (sentinel `0`), `end_pc` is used for the
+ false-arm target and no label is pushed; otherwise a label is pushed
+ with its target at `scan_end` so the matching `:else` can pop it and
+ jump to the end.
 
 ### `:end` vs `:end-toplevel`
 
@@ -77,11 +95,12 @@ that does *not* mean "function return".
 ### Guard-hint conditioning
 
 The loop generator detects whether the opcode table includes any of
-`:block` / `:loop-begin` / `:br` / `:br-if` (via `entries-have-control-flow-p`)
-and only then splices the `STRUCT-wst-lpc/lsp/lkind-INDEX-OKP` and
-`scan_end` rules into the generated guard hints. That way the control-flow-
-free `loop-demo.lisp` still certifies against a `|wst|` defstruct that has
-no `lpc`/`lsp`/`lkind` slots, while `integration-demo.lisp` picks up the
+`:block` / `:loop-begin` / `:br` / `:br-if` / `:if` / `:else`
+(via `entries-have-control-flow-p`) and only then splices the
+`STRUCT-wst-lpc/lsp/lkind-INDEX-OKP`, `scan_end`, and `scan_else` rules
+into the generated guard hints. That way the control-flow-free
+`loop-demo.lisp` still certifies against a `|wst|` defstruct that has no
+`lpc`/`lsp`/`lkind` slots, while `integration-demo.lisp` picks up the
 richer struct from `../wasm-vm1.lisp` and gets the extra enables it needs.
 
 ### Execution loop
@@ -111,19 +130,32 @@ i32.add, i32.rem_u) is driven by this table:
   (:i32-binop-nz     #x70 c::rem-uint-uint))  ; i32.rem_u
 ```
 
-The full 13-op control-flow table, used by
-[integration-demo.lisp](integration-demo.lisp) for gcd, adds:
+The full 18-op control-flow table, used by
+[integration-demo.lisp](integration-demo.lisp) for gcd / factorial /
+is_prime / collatz, adds:
 
 ```lisp
-  (:end              #x0b)   ; pops a label if any, else halts
+  (:end              #x0b)                         ; pops a label if any, else halts
   (:i32-unop-eqz     #x45)
+  (:i32-binop-total  #x6b c::sub-uint-uint)        ; i32.sub
+  (:i32-binop-total  #x6c c::mul-uint-uint)        ; i32.mul
+  (:i32-binop-nz     #x6d c::div-uint-uint)        ; i32.div_u
+  (:i32-relop        #x46 c::eq-sint-sint)         ; i32.eq   (any sint relop works)
+  (:i32-relop        #x47 c::ne-sint-sint)         ; i32.ne
+  (:i32-relop        #x49 c::lt-uint-uint)         ; i32.lt_u
+  (:i32-relop        #x4b c::gt-uint-uint)         ; i32.gt_u
+  (:i32-relop        #x4d c::le-uint-uint)         ; i32.le_u
+  (:i32-relop        #x4f c::ge-uint-uint)         ; i32.ge_u
   (:block            #x02)
   (:loop-begin       #x03)
   (:br               #x0c)
   (:br-if            #x0d)
+  (:if               #x04)                         ; if BT (with optional else)
+  (:else             #x05)                         ; else
+  (:return           #x0f)                         ; return (halts loop)
 ```
 
-and produces [loop-demo.c](loop-demo.c) (8-op) or [run.c](run.c) (13-op)
+and produces [loop-demo.c](loop-demo.c) (8-op) or [run.c](run.c) (18-op)
 each containing a single dispatch C function. Compare to the ~1100
 hand-written lines covering this same set in
 [`../wasm-vm1.lisp`](../wasm-vm1.lisp) `|exec$loop|`.
@@ -270,9 +302,11 @@ $ ./run_demo ../../tests/oracle/gcd.wasm gcd 1000000 999983
 ```
 
 [addmod.wat](addmod.wat) is a straight-line example using only the 8
-straight-line opcodes. The `gcd.wasm` fixture exercises the full 13-op
-vocabulary — `block` / `loop` / `br` / `br_if` / `i32.eqz` — through the
-same generated dispatch loop. `wat2wasm` is available at
+straight-line opcodes. The `gcd.wasm` / `factorial.wasm` / `is_prime.wasm` /
+`collatz.wasm` fixtures exercise the full 18-op vocabulary — `block` /
+`loop` / `br` / `br_if` / `if` / `else` / `return` / `i32.eqz` / the
+full unsigned relop family / sub / mul / div_u — through the same
+generated dispatch loop. `wat2wasm` is available at
 `tools/node_modules/.bin/wat2wasm`.
 
 Two additional drivers exist for regression / isolation work:
@@ -459,6 +493,43 @@ person — or the next shape — doesn't re-trip them.
     presents as a stack-bound checkpoint `(… <= 64)` that seems
     unrelated to the typo.
 
+16. **ATC's loop shape requires a single non-recursive exit
+    `(mv a b c …)` whose args are exactly the loop formals.** When
+    we first wrote `|scan_else$loop|` with two early exits (returning
+    `(mv (pc+1) 1 fuel)` on "else found" and `(mv 0 0 fuel)` on
+    "end-at-1 reached"), ATC rejected it: "The 'else' branch … does
+    not have the required form." Fix: make the loop body *always*
+    recurse, and encode termination by **setting a loop formal to a
+    sentinel** — here `depth := 0` on either exit condition — so the
+    guard `(depth > 0)` then terminates the loop on the next call.
+    The wrapper function then inspects the final `depth` (and `pc`) to
+    decide what to return. This same pattern applies to any host
+    helper with multiple semantic exit conditions.
+
+17. **Host helpers with multi-bit return types need a `defrulel`
+    per returned mv-nth index you guard against.** `|scan_else|`'s
+    wrapper reads *both* `mv-nth 0` (pc) and `mv-nth 1` (depth)
+    from the loop and needs each to be provably `sintp` in the guard
+    proof. Missing the `mv-nth 1` lemma presents as a key checkpoint
+    `(C::SINTP (MV-NTH 1 (|scan_else$loop| …)))` in the wrapper's guard
+    conjecture — easy to miss under a "should already be obvious"
+    first-reaction, since the analogous `|scan_end|` only reads
+    `mv-nth 0`. Add one `defrulel sintp-of-mv-nth-N-<loop>` per index
+    used.
+
+18. **`scan$loop`'s `is_wide` list must include every wide opcode
+    the input bytecode can contain, not just the control-flow ones.**
+    The hand-written `scan$loop` originally marked only
+    `0x0c` / `0x0d` / `0x20..0x22` as 2-byte, under the assumption
+    that non-control-flow opcodes wouldn't appear inside a `:block`
+    body. That's wrong for realistic input: an `i32.const N` at
+    `body_pc` would cause `scan$loop` to re-interpret `N` as the next
+    opcode, producing a garbage end PC. `is_prime` happened to work
+    because its immediates (0, 1, 2) were all structurally harmless;
+    `collatz`'s `0x03` (`i32.const 3`) was not. Add every 2-byte
+    opcode you support to the `is_wide` cascade in both `scan$loop`
+    *and* `scan_else$loop`.
+
 ## Adding a new shape
 
 For a new operation whose spec doesn't fit an existing shape, add one
@@ -477,20 +548,21 @@ copy from:
   symbol (`c::add-uint-uint`, `c::mul-uint-uint`, …);
   `:i32-binop-nz` additionally takes the op's `-okp` predicate.
 
-Most of `execution.lisp` fits into shapes of this kind. Future
-additions likely needed:
+Most of `execution.lisp` fits into shapes of this kind. Completed so far
+(see Status above) include `:i32-relop`, `:if`, `:else`, `:return`,
+and the `:block` / `:loop-begin` / `:br` / `:br-if` label-stack family.
+Still-open additions:
 
-- `:i32-unop` — `clz`/`ctz`/`popcnt`/`eqz` (one pop, one push).
-- `:i32-relop` — `eq`/`ne`/`lt_u`/`lt_s`/… (two pops, push 0/1).
+- `:i32-unop` — `clz`/`ctz`/`popcnt` (one pop, one push; `eqz` already
+  has its own `:i32-unop-eqz`).
 - `:i32-shift` — like binop-total but the rhs is masked `% 32`.
-- `:i32-binop-signed` / `:i32-binop-signed-nz` — for `div_s`/`rem_s`.
+- `:i32-binop-signed` / `:i32-binop-signed-nz` — for `div_s`/`rem_s`;
+  also `:i32-relop-signed` for `lt_s`/`gt_s`/`le_s`/`ge_s`.
 - `:global-get-set` — straightforward pusher/popper over a separate
   `glob[]` array added to `|wst|`.
 - `:i64-*` — same shapes re-instantiated for 64-bit.
-- `:block` / `:loop` / `:br` / `:br_if` — label-stack ops. The
-  dispatcher layer already has `|nl|` / `|lpc|` / `|lsp|` / `|lkind|`
-  ready from [../wasm-vm1.lisp](../wasm-vm1.lisp); the arms would
-  follow the same `ok`-gating discipline as the step shapes.
+- Memory ops (`i32.load` / `i32.store` / `memory.grow`) — would need a
+  linear-memory slot in `|wst|` and byte-level access helpers.
 
 ## How the generator maps spec → ATC
 
@@ -547,39 +619,6 @@ of the spec, not a per-invocation operation. Automating the pairing
 (by introspecting the unnormalized body of `execute-<op>` and
 matching it against each shape's canonical template) is a natural
 later step but is not necessary for the code-generation job.
-
-## Adding a new shape
-
-For a new operation whose spec doesn't fit an existing shape, add one
-template macro to [templates.lisp](templates.lisp) (for the
-standalone step function) and one arm emitter to
-[loop.lisp](loop.lisp) (for the dispatched loop), then one dispatch
-entry in each of `gen-exec-op` / `emit-arm`. Existing templates to
-copy from:
-
-- **Stack-only shapes** (no immediate): `:drop`, `:i32-binop-total`,
-  `:i32-binop-nz`.
-- **Immediate shapes**: `:i32-const` (u32), `:local-idx-pusher` /
-  `:local-idx-popper` / `:local-idx-teer` (local index),
-  `:end-toplevel`.
-- **Parameterized shapes**: `:i32-binop-total` takes the ATC op
-  symbol (`c::add-uint-uint`, `c::mul-uint-uint`, …);
-  `:i32-binop-nz` additionally takes the op's `-okp` predicate.
-
-Most of `execution.lisp` fits into shapes of this kind. Future
-additions likely needed:
-
-- `:i32-unop` — `clz`/`ctz`/`popcnt`/`eqz` (one pop, one push).
-- `:i32-relop` — `eq`/`ne`/`lt_u`/`lt_s`/… (two pops, push 0/1).
-- `:i32-shift` — like binop-total but the rhs is masked `% 32`.
-- `:i32-binop-signed` / `:i32-binop-signed-nz` — for `div_s`/`rem_s`.
-- `:global-get-set` — straightforward pusher/popper over a separate
-  `glob[]` array added to `|wst|`.
-- `:i64-*` — same shapes re-instantiated for 64-bit.
-- `:block` / `:loop` / `:br` / `:br_if` — label-stack ops. The
-  dispatcher layer already has `|nl|` / `|lpc|` / `|lsp|` / `|lkind|`
-  ready from [../wasm-vm1.lisp](../wasm-vm1.lisp); the arms would
-  follow the same `ok`-gating discipline as the step shapes.
 
 ## What this proves about the original concern
 

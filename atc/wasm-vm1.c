@@ -61,7 +61,7 @@ int scan_end(int pc) {
         int b = (int) wasm_buf[pc];
         int is_open = b == 2 || (b == 3 || b == 4);
         int is_end = b == 11;
-        int is_wide = is_open || (b == 12 || (b == 13 || (b == 32 || (b == 33 || b == 34))));
+        int is_wide = is_open || (b == 12 || (b == 13 || (b == 32 || (b == 33 || (b == 34 || b == 65)))));
         depth = is_open ? depth + 1 : is_end ? depth - 1 : depth;
         pc = is_wide ? pc + 2 : pc + 1;
         fuel = fuel - 1;

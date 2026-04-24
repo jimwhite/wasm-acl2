@@ -61,12 +61,29 @@ int scan_end(int pc) {
         int b = (int) wasm_buf[pc];
         int is_open = b == 2 || (b == 3 || b == 4);
         int is_end = b == 11;
-        int is_wide = is_open || (b == 12 || (b == 13 || (b == 32 || (b == 33 || b == 34))));
+        int is_wide = is_open || (b == 12 || (b == 13 || (b == 32 || (b == 33 || (b == 34 || b == 65)))));
         depth = is_open ? depth + 1 : is_end ? depth - 1 : depth;
         pc = is_wide ? pc + 2 : pc + 1;
         fuel = fuel - 1;
     }
     return pc;
+}
+
+int scan_else(int pc) {
+    int depth = 1;
+    int fuel = 4096;
+    while (depth > 0 && fuel > 0 && pc < 59998 && depth < 4095) {
+        int b = (int) wasm_buf[pc];
+        int is_else_here = b == 5 && depth == 1;
+        int is_open = b == 2 || (b == 3 || b == 4);
+        int is_end = b == 11;
+        int is_end_at_1 = is_end && depth == 1;
+        int is_wide = is_open || (b == 12 || (b == 13 || (b == 32 || (b == 33 || (b == 34 || b == 65)))));
+        pc = is_else_here ? pc + 1 : is_end_at_1 ? 0 : is_wide ? pc + 2 : pc + 1;
+        depth = is_else_here || is_end_at_1 ? 0 : is_open ? depth + 1 : is_end ? depth - 1 : depth;
+        fuel = fuel - 1;
+    }
+    return depth == 0 ? pc : 0;
 }
 
 unsigned int run_wasm_gen(struct wst *st, struct wmod *m, unsigned int a, unsigned int b) {
@@ -154,137 +171,260 @@ unsigned int run_wasm_gen(struct wst *st, struct wmod *m, unsigned int a, unsign
                                     halted = ok ? halted : 1;
                                     fuel = fuel - 1;
                                 } else {
-                                    if (b == 106) {
+                                    if (b == 73) {
                                         int ok = sp > 1;
                                         int bi = ok ? sp - 1 : 0;
                                         int ai = ok ? sp - 2 : 0;
                                         unsigned int bv = st->op[bi];
                                         unsigned int av = st->op[ai];
-                                        unsigned int rv = av + bv;
+                                        int r_sint = av < bv;
+                                        unsigned int rv = (unsigned int) r_sint;
                                         st->op[ai] = rv;
                                         sp = ok ? sp - 1 : sp;
                                         pc = pc + 1;
                                         halted = ok ? halted : 1;
                                         fuel = fuel - 1;
                                     } else {
-                                        if (b == 107) {
+                                        if (b == 75) {
                                             int ok = sp > 1;
                                             int bi = ok ? sp - 1 : 0;
                                             int ai = ok ? sp - 2 : 0;
                                             unsigned int bv = st->op[bi];
                                             unsigned int av = st->op[ai];
-                                            unsigned int rv = av - bv;
+                                            int r_sint = av > bv;
+                                            unsigned int rv = (unsigned int) r_sint;
                                             st->op[ai] = rv;
                                             sp = ok ? sp - 1 : sp;
                                             pc = pc + 1;
                                             halted = ok ? halted : 1;
                                             fuel = fuel - 1;
                                         } else {
-                                            if (b == 108) {
+                                            if (b == 77) {
                                                 int ok = sp > 1;
                                                 int bi = ok ? sp - 1 : 0;
                                                 int ai = ok ? sp - 2 : 0;
                                                 unsigned int bv = st->op[bi];
                                                 unsigned int av = st->op[ai];
-                                                unsigned int rv = av * bv;
+                                                int r_sint = av <= bv;
+                                                unsigned int rv = (unsigned int) r_sint;
                                                 st->op[ai] = rv;
                                                 sp = ok ? sp - 1 : sp;
                                                 pc = pc + 1;
                                                 halted = ok ? halted : 1;
                                                 fuel = fuel - 1;
                                             } else {
-                                                if (b == 112) {
+                                                if (b == 79) {
                                                     int ok = sp > 1;
                                                     int bi = ok ? sp - 1 : 0;
                                                     int ai = ok ? sp - 2 : 0;
                                                     unsigned int bv = st->op[bi];
                                                     unsigned int av = st->op[ai];
-                                                    int nz = bv != 0U;
-                                                    int safe = ok && nz;
-                                                    unsigned int bv_safe = safe ? bv : 1U;
-                                                    unsigned int rv = av % bv_safe;
+                                                    int r_sint = av >= bv;
+                                                    unsigned int rv = (unsigned int) r_sint;
                                                     st->op[ai] = rv;
-                                                    sp = safe ? sp - 1 : sp;
+                                                    sp = ok ? sp - 1 : sp;
                                                     pc = pc + 1;
-                                                    halted = safe ? halted : 1;
+                                                    halted = ok ? halted : 1;
                                                     fuel = fuel - 1;
                                                 } else {
-                                                    if (b == 2) {
-                                                        int ok = nl < 16;
-                                                        int nl_safe = ok ? nl : 0;
-                                                        int end_pc_raw = scan_end(pc + 2);
-                                                        int end_pc = end_pc_raw >= 0 && end_pc_raw <= 60000 ? end_pc_raw : 0;
-                                                        st->lpc[nl_safe] = end_pc;
-                                                        st->lsp[nl_safe] = sp;
-                                                        st->lkind[nl_safe] = (unsigned char) 0;
-                                                        nl = ok ? nl + 1 : nl;
-                                                        pc = pc + 2;
+                                                    if (b == 106) {
+                                                        int ok = sp > 1;
+                                                        int bi = ok ? sp - 1 : 0;
+                                                        int ai = ok ? sp - 2 : 0;
+                                                        unsigned int bv = st->op[bi];
+                                                        unsigned int av = st->op[ai];
+                                                        unsigned int rv = av + bv;
+                                                        st->op[ai] = rv;
+                                                        sp = ok ? sp - 1 : sp;
+                                                        pc = pc + 1;
                                                         halted = ok ? halted : 1;
                                                         fuel = fuel - 1;
                                                     } else {
-                                                        if (b == 3) {
-                                                            int ok = nl < 16;
-                                                            int nl_safe = ok ? nl : 0;
-                                                            int loop_pc = pc + 2;
-                                                            st->lpc[nl_safe] = loop_pc;
-                                                            st->lsp[nl_safe] = sp;
-                                                            st->lkind[nl_safe] = (unsigned char) 1;
-                                                            nl = ok ? nl + 1 : nl;
-                                                            pc = loop_pc;
+                                                        if (b == 107) {
+                                                            int ok = sp > 1;
+                                                            int bi = ok ? sp - 1 : 0;
+                                                            int ai = ok ? sp - 2 : 0;
+                                                            unsigned int bv = st->op[bi];
+                                                            unsigned int av = st->op[ai];
+                                                            unsigned int rv = av - bv;
+                                                            st->op[ai] = rv;
+                                                            sp = ok ? sp - 1 : sp;
+                                                            pc = pc + 1;
                                                             halted = ok ? halted : 1;
                                                             fuel = fuel - 1;
                                                         } else {
-                                                            if (b == 12) {
-                                                                int l_byte = (int) wasm_buf[pc + 1];
-                                                                int pop_ok = 1;
-                                                                int sp_after_pop = sp;
-                                                                int take = 1;
-                                                                int l_ok = l_byte < nl;
-                                                                int target_idx = l_ok ? nl - 1 - l_byte : 0;
-                                                                int tpc_raw = st->lpc[target_idx];
-                                                                int tsp_raw = st->lsp[target_idx];
-                                                                unsigned char tkind_uc = st->lkind[target_idx];
-                                                                int tkind = (int) tkind_uc;
-                                                                int tpc_ok = tpc_raw >= 0 && tpc_raw <= 60000;
-                                                                int tsp_ok = tsp_raw >= 0 && tsp_raw <= 64;
-                                                                int all_ok = pop_ok && l_ok && tpc_ok && tsp_ok;
-                                                                int new_nl = all_ok && take ? tkind == 1 ? target_idx + 1 : target_idx : nl;
-                                                                int new_sp = all_ok && take ? tsp_raw : sp_after_pop;
-                                                                int new_pc = all_ok && take ? tpc_raw : pc + 2;
-                                                                sp = new_sp;
-                                                                nl = new_nl;
-                                                                pc = new_pc;
-                                                                halted = all_ok ? halted : 1;
+                                                            if (b == 108) {
+                                                                int ok = sp > 1;
+                                                                int bi = ok ? sp - 1 : 0;
+                                                                int ai = ok ? sp - 2 : 0;
+                                                                unsigned int bv = st->op[bi];
+                                                                unsigned int av = st->op[ai];
+                                                                unsigned int rv = av * bv;
+                                                                st->op[ai] = rv;
+                                                                sp = ok ? sp - 1 : sp;
+                                                                pc = pc + 1;
+                                                                halted = ok ? halted : 1;
                                                                 fuel = fuel - 1;
                                                             } else {
-                                                                if (b == 13) {
-                                                                    int l_byte = (int) wasm_buf[pc + 1];
-                                                                    int pop_ok = sp > 0;
-                                                                    int sp_after_pop = sp > 0 ? sp - 1 : sp;
-                                                                    int peek_idx = sp > 0 ? sp - 1 : 0;
-                                                                    unsigned int peek_v = st->op[peek_idx];
-                                                                    int cond_true = peek_v != 0U || peek_v != 0U;
-                                                                    int take = cond_true || cond_true;
-                                                                    int l_ok = l_byte < nl;
-                                                                    int target_idx = l_ok ? nl - 1 - l_byte : 0;
-                                                                    int tpc_raw = st->lpc[target_idx];
-                                                                    int tsp_raw = st->lsp[target_idx];
-                                                                    unsigned char tkind_uc = st->lkind[target_idx];
-                                                                    int tkind = (int) tkind_uc;
-                                                                    int tpc_ok = tpc_raw >= 0 && tpc_raw <= 60000;
-                                                                    int tsp_ok = tsp_raw >= 0 && tsp_raw <= 64;
-                                                                    int all_ok = pop_ok && l_ok && tpc_ok && tsp_ok;
-                                                                    int new_nl = all_ok && take ? tkind == 1 ? target_idx + 1 : target_idx : nl;
-                                                                    int new_sp = all_ok && take ? tsp_raw : sp_after_pop;
-                                                                    int new_pc = all_ok && take ? tpc_raw : pc + 2;
-                                                                    sp = new_sp;
-                                                                    nl = new_nl;
-                                                                    pc = new_pc;
-                                                                    halted = all_ok ? halted : 1;
+                                                                if (b == 110) {
+                                                                    int ok = sp > 1;
+                                                                    int bi = ok ? sp - 1 : 0;
+                                                                    int ai = ok ? sp - 2 : 0;
+                                                                    unsigned int bv = st->op[bi];
+                                                                    unsigned int av = st->op[ai];
+                                                                    int nz = bv != 0U;
+                                                                    int safe = ok && nz;
+                                                                    unsigned int bv_safe = safe ? bv : 1U;
+                                                                    unsigned int rv = av / bv_safe;
+                                                                    st->op[ai] = rv;
+                                                                    sp = safe ? sp - 1 : sp;
+                                                                    pc = pc + 1;
+                                                                    halted = safe ? halted : 1;
                                                                     fuel = fuel - 1;
                                                                 } else {
-                                                                    halted = 1;
-                                                                    fuel = fuel - 1;
+                                                                    if (b == 112) {
+                                                                        int ok = sp > 1;
+                                                                        int bi = ok ? sp - 1 : 0;
+                                                                        int ai = ok ? sp - 2 : 0;
+                                                                        unsigned int bv = st->op[bi];
+                                                                        unsigned int av = st->op[ai];
+                                                                        int nz = bv != 0U;
+                                                                        int safe = ok && nz;
+                                                                        unsigned int bv_safe = safe ? bv : 1U;
+                                                                        unsigned int rv = av % bv_safe;
+                                                                        st->op[ai] = rv;
+                                                                        sp = safe ? sp - 1 : sp;
+                                                                        pc = pc + 1;
+                                                                        halted = safe ? halted : 1;
+                                                                        fuel = fuel - 1;
+                                                                    } else {
+                                                                        if (b == 2) {
+                                                                            int ok = nl < 16;
+                                                                            int nl_safe = ok ? nl : 0;
+                                                                            int end_pc_raw = scan_end(pc + 2);
+                                                                            int end_pc = end_pc_raw >= 0 && end_pc_raw <= 60000 ? end_pc_raw : 0;
+                                                                            st->lpc[nl_safe] = end_pc;
+                                                                            st->lsp[nl_safe] = sp;
+                                                                            st->lkind[nl_safe] = (unsigned char) 0;
+                                                                            nl = ok ? nl + 1 : nl;
+                                                                            pc = pc + 2;
+                                                                            halted = ok ? halted : 1;
+                                                                            fuel = fuel - 1;
+                                                                        } else {
+                                                                            if (b == 3) {
+                                                                                int ok = nl < 16;
+                                                                                int nl_safe = ok ? nl : 0;
+                                                                                int loop_pc = pc + 2;
+                                                                                st->lpc[nl_safe] = loop_pc;
+                                                                                st->lsp[nl_safe] = sp;
+                                                                                st->lkind[nl_safe] = (unsigned char) 1;
+                                                                                nl = ok ? nl + 1 : nl;
+                                                                                pc = loop_pc;
+                                                                                halted = ok ? halted : 1;
+                                                                                fuel = fuel - 1;
+                                                                            } else {
+                                                                                if (b == 12) {
+                                                                                    int l_byte = (int) wasm_buf[pc + 1];
+                                                                                    int pop_ok = 1;
+                                                                                    int sp_after_pop = sp;
+                                                                                    int take = 1;
+                                                                                    int l_ok = l_byte < nl;
+                                                                                    int target_idx = l_ok ? nl - 1 - l_byte : 0;
+                                                                                    int tpc_raw = st->lpc[target_idx];
+                                                                                    int tsp_raw = st->lsp[target_idx];
+                                                                                    unsigned char tkind_uc = st->lkind[target_idx];
+                                                                                    int tkind = (int) tkind_uc;
+                                                                                    int tpc_ok = tpc_raw >= 0 && tpc_raw <= 60000;
+                                                                                    int tsp_ok = tsp_raw >= 0 && tsp_raw <= 64;
+                                                                                    int all_ok = pop_ok && l_ok && tpc_ok && tsp_ok;
+                                                                                    int new_nl = all_ok && take ? tkind == 1 ? target_idx + 1 : target_idx : nl;
+                                                                                    int new_sp = all_ok && take ? tsp_raw : sp_after_pop;
+                                                                                    int new_pc = all_ok && take ? tpc_raw : pc + 2;
+                                                                                    sp = new_sp;
+                                                                                    nl = new_nl;
+                                                                                    pc = new_pc;
+                                                                                    halted = all_ok ? halted : 1;
+                                                                                    fuel = fuel - 1;
+                                                                                } else {
+                                                                                    if (b == 13) {
+                                                                                        int l_byte = (int) wasm_buf[pc + 1];
+                                                                                        int pop_ok = sp > 0;
+                                                                                        int sp_after_pop = sp > 0 ? sp - 1 : sp;
+                                                                                        int peek_idx = sp > 0 ? sp - 1 : 0;
+                                                                                        unsigned int peek_v = st->op[peek_idx];
+                                                                                        int cond_true = peek_v != 0U || peek_v != 0U;
+                                                                                        int take = cond_true || cond_true;
+                                                                                        int l_ok = l_byte < nl;
+                                                                                        int target_idx = l_ok ? nl - 1 - l_byte : 0;
+                                                                                        int tpc_raw = st->lpc[target_idx];
+                                                                                        int tsp_raw = st->lsp[target_idx];
+                                                                                        unsigned char tkind_uc = st->lkind[target_idx];
+                                                                                        int tkind = (int) tkind_uc;
+                                                                                        int tpc_ok = tpc_raw >= 0 && tpc_raw <= 60000;
+                                                                                        int tsp_ok = tsp_raw >= 0 && tsp_raw <= 64;
+                                                                                        int all_ok = pop_ok && l_ok && tpc_ok && tsp_ok;
+                                                                                        int new_nl = all_ok && take ? tkind == 1 ? target_idx + 1 : target_idx : nl;
+                                                                                        int new_sp = all_ok && take ? tsp_raw : sp_after_pop;
+                                                                                        int new_pc = all_ok && take ? tpc_raw : pc + 2;
+                                                                                        sp = new_sp;
+                                                                                        nl = new_nl;
+                                                                                        pc = new_pc;
+                                                                                        halted = all_ok ? halted : 1;
+                                                                                        fuel = fuel - 1;
+                                                                                    } else {
+                                                                                        if (b == 4) {
+                                                                                            int sp_ok = sp > 0;
+                                                                                            int nl_ok = nl < 16;
+                                                                                            int ok = sp_ok && nl_ok;
+                                                                                            int cond_idx = sp_ok ? sp - 1 : 0;
+                                                                                            unsigned int cond_v = st->op[cond_idx];
+                                                                                            int cond_true = cond_v != 0U || cond_v != 0U;
+                                                                                            int sp_after_pop = sp_ok ? sp - 1 : sp;
+                                                                                            int nl_safe = nl_ok ? nl : 0;
+                                                                                            int body_pc = pc + 2;
+                                                                                            int end_pc_raw = scan_end(body_pc);
+                                                                                            int end_pc_ok = end_pc_raw >= 0 && end_pc_raw <= 60000;
+                                                                                            int end_pc = end_pc_ok ? end_pc_raw : 0;
+                                                                                            int else_pc_raw = scan_else(body_pc);
+                                                                                            int else_pc_ok = else_pc_raw >= 0 && else_pc_raw <= 60000;
+                                                                                            int else_pc = else_pc_ok ? else_pc_raw : 0;
+                                                                                            int has_else = else_pc_ok && else_pc > 0;
+                                                                                            st->lpc[nl_safe] = end_pc;
+                                                                                            st->lsp[nl_safe] = sp_after_pop;
+                                                                                            st->lkind[nl_safe] = (unsigned char) 0;
+                                                                                            int all_ok = ok && end_pc_ok;
+                                                                                            int push_label = all_ok && (cond_true || has_else);
+                                                                                            sp = sp_after_pop;
+                                                                                            nl = push_label ? nl + 1 : nl;
+                                                                                            pc = all_ok ? cond_true ? body_pc : has_else ? else_pc : end_pc : pc;
+                                                                                            halted = all_ok ? halted : 1;
+                                                                                            fuel = fuel - 1;
+                                                                                        } else {
+                                                                                            if (b == 5) {
+                                                                                                int nl_ok = nl > 0;
+                                                                                                int end_pc_raw = scan_end(pc + 1);
+                                                                                                int end_pc_ok = end_pc_raw >= 0 && end_pc_raw <= 60000;
+                                                                                                int end_pc = end_pc_ok ? end_pc_raw : 0;
+                                                                                                int all_ok = nl_ok && end_pc_ok;
+                                                                                                nl = all_ok ? nl - 1 : nl;
+                                                                                                pc = all_ok ? end_pc : pc;
+                                                                                                halted = all_ok ? halted : 1;
+                                                                                                fuel = fuel - 1;
+                                                                                            } else {
+                                                                                                if (b == 15) {
+                                                                                                    halted = 1;
+                                                                                                    fuel = fuel - 1;
+                                                                                                } else {
+                                                                                                    halted = 1;
+                                                                                                    fuel = fuel - 1;
+                                                                                                }
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
                                                                 }
                                                             }
                                                         }

@@ -63,6 +63,34 @@
            c::assign
            c::condexpr))
 
+;; Same for scan_else$loop: defrulel'd in wasm-vm1.lisp; :if's guard
+;; proof in the generated loop needs to see that scan_else returns sintp.
+(defrule sintp-of-mv-nth-0-scan_else$loop-for-codegen
+  (implies (and (c::sintp |pc|)
+                (c::sintp |depth|)
+                (c::sintp |fuel|)
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (<= 0 (c::integer-from-sint |depth|))
+                (<= (c::integer-from-sint |depth|) 4096)
+                (<= 0 (c::integer-from-sint |fuel|))
+                (<= (c::integer-from-sint |fuel|) 4096))
+           (c::sintp (mv-nth 0 (|scan_else$loop| |pc| |depth| |fuel|
+                                                 |wasm_buf|))))
+  :induct (|scan_else$loop| |pc| |depth| |fuel| |wasm_buf|)
+  :enable (|scan_else$loop|
+           c::add-sint-sint
+           c::sub-sint-sint
+           c::gt-sint-sint
+           c::lt-sint-sint
+           c::eq-sint-sint
+           c::boolean-from-sint
+           c::sint-from-boolean
+           c::sint-integerp-alt-def
+           c::declar
+           c::assign
+           c::condexpr))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Generate the dispatcher.  Same 8-opcode table as loop-demo.lisp; bodies
 ;; are spliced in by the template-family emitters in loop.lisp.
@@ -76,14 +104,22 @@
   (:local-idx-teer   #x22)
   (:i32-const        #x41)                       ; u8 immediate (simplified)
   (:i32-unop-eqz     #x45)                       ; i32.eqz
+  (:i32-relop        #x49 c::lt-uint-uint)       ; i32.lt_u
+  (:i32-relop        #x4b c::gt-uint-uint)       ; i32.gt_u
+  (:i32-relop        #x4d c::le-uint-uint)       ; i32.le_u
+  (:i32-relop        #x4f c::ge-uint-uint)       ; i32.ge_u
   (:i32-binop-total  #x6a c::add-uint-uint)      ; i32.add
   (:i32-binop-total  #x6b c::sub-uint-uint)      ; i32.sub
   (:i32-binop-total  #x6c c::mul-uint-uint)      ; i32.mul
+  (:i32-binop-nz     #x6e c::div-uint-uint)      ; i32.div_u
   (:i32-binop-nz     #x70 c::rem-uint-uint)      ; i32.rem_u
   (:block            #x02)                       ; block BT
   (:loop-begin       #x03)                       ; loop BT
   (:br               #x0c)                       ; br L
-  (:br-if            #x0d))                      ; br_if L
+  (:br-if            #x0d)                       ; br_if L
+  (:if               #x04)                       ; if BT (with optional else)
+  (:else             #x05)                       ; else
+  (:return           #x0f))                      ; return (halts loop)
 
 ;; Needed so `|run_wasm_gen|'s guard proof can see that the loop preserves
 ;; `struct-|wst|-p'.  Mirrors `struct-wst-p-of-mv-nth-0-exec$loop' in
@@ -161,6 +197,8 @@
         |parse_module|
         |scan$loop|
         |scan_end|
+        |scan_else$loop|
+        |scan_else|
         |exec_loop_gen|
         |run_wasm_gen|
         :file-name "run"
