@@ -77,6 +77,8 @@
   (:i32-const        #x41)                       ; u8 immediate (simplified)
   (:i32-unop-eqz     #x45)                       ; i32.eqz
   (:i32-binop-total  #x6a c::add-uint-uint)      ; i32.add
+  (:i32-binop-total  #x6b c::sub-uint-uint)      ; i32.sub
+  (:i32-binop-total  #x6c c::mul-uint-uint)      ; i32.mul
   (:i32-binop-nz     #x70 c::rem-uint-uint)      ; i32.rem_u
   (:block            #x02)                       ; block BT
   (:loop-begin       #x03)                       ; loop BT
