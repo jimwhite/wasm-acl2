@@ -997,3 +997,198 @@ Two small lemmas suffice:
   one induction with the GCD-style hand scheme. Round 2 (proving
   `fac-iter-named` or `fac-opt` against the same spec) will be the
   genuine A/B test for APT's value in this codebase.
+
+---
+
+## Appendix D — Attempt at a WASM loop lifter, and what's missing
+
+**Status: incomplete, not aligned with the Axe model. Both artifacts
+(`wasm-loop-lifter.lisp` and `proof-factorial-v2.lisp`) certify, but
+the approach does not achieve the compression or workflow of the
+Axe example `factorial-elf64.lisp` and should be redone.**
+
+### D.1  What was built
+
+- [wasm-loop-lifter.lisp](wasm-loop-lifter.lisp) — a single `encapsulate`
+  declaring 10 abstract witnesses (`ll-input-ok`, `ll-exit?`, `ll-next`,
+  `ll-result`, `ll-measure`, `ll-fn`, `ll-total-fuel`, `ll-iter-fuel`,
+  `ll-exit-fuel`, `ll-state-at-header`) plus 11 exported constraint
+  theorems, and one generic theorem `ll-loop-correct` stating that
+  running `ll-total-fuel` steps from `ll-state-at-header` leaves
+  `ll-fn(vars)` on top of the operand stack. 279 lines, certifies in
+  0.3 s.
+
+- [proof-factorial-v2.lisp](proof-factorial-v2.lisp) — first client:
+  factorial via `:functional-instance ll-loop-correct`. 447 lines,
+  certifies in 0.6 s.
+
+### D.2  Why this is the wrong shape
+
+Compare to [factorial-elf64.lisp](../../../acl2/books/kestrel/axe/x86/examples/factorial/factorial-elf64.lisp),
+which is ~100 lines and has this structure:
+
+```
+(lift-subroutine factorial                                 ; (1) lift machine code
+                 :target "fact"
+                 :executable "factorial.elf64"
+                 :loops ((40 . (40 44 26 29 33 36)))       ;     → named loops
+                 :measures ((40 (bvchop 32 var12)))
+                 :stack-slots 4)
+
+(def factorial-loop-1.2-pre (wrap-output factorial-loop-1 …))
+(def factorial-loop-1.2     (simplify factorial-loop-1.2-pre))
+(def factorial-loop-1.3     (drop-irrelevant-params factorial-loop-1.2 …))
+(def factorial-loop-1.4     (rename-params factorial-loop-1.3 ((var12 n) (var16 acc))))
+(def factorial-spec.2       (apt::tailrec factorial-spec …))
+
+(defthm connection-lemma (… (factorial-spec.2 n acc) (factorial-loop-1.4 n acc))
+  :hints (("Goal" :induct t :in-theory (enable factorial-spec.2))))
+
+(defthm final (… (factorial n undef) (factorial-spec n)))
+```
+
+The Axe pipeline **automatically produces the lifted ACL2 function
+from the ELF binary**. The user never writes
+`factorial-loop-1`, `make-fac-header`, `fac-iter-step`, or
+`fac-exit-step` — all of that is generated. Only the tail-recursive
+spec and the one-line induction `connection-lemma` are hand-written.
+
+In v2 we still write, by hand:
+
+1. `*fac-body*` / `*fac-loop-body*` / `*fac-block-label*` /
+   `*fac-loop-label*` — the body is _copied out of the .wasm binary
+   into the proof source_, duplicating information already present in
+   `*fac-func*`.
+2. `make-fac-state`, `make-fac-header` — state-shape constructors.
+3. `fac-iter-step` (13-step iter lemma) and `fac-exit-step` (4-step
+   exit lemma) — program-specific symbolic-execution proofs.
+4. `fac-vars-ok`, `fac-exit?`, `fac-next`, `fac-result`, `fac-measure`,
+   `fac-loop-fn`, `fac-iter-fuel`, `fac-exit-fuel`, `fac-total-fuel`
+   — the "lifted loop function" as a manual ACL2 defun, plus fuel
+   accounting.
+5. A dozen boilerplate constraint theorems matching the encapsulate's
+   exported signature (`natp-of-fac-iter-fuel`, `o-p-of-fac-measure`,
+   `fac-vars-ok-of-fac-next`, `statep-of-make-fac-header`, …).
+6. The functional-instantiation theorem itself, with a brittle
+   `:in-theory (disable …)` hint list.
+
+That is **everything the Axe toolchain does automatically**, written
+out by hand in ACL2 syntax. The lifter theorem `ll-loop-correct`
+only abstracts step 6's inductive argument; items 1–5 are the bulk
+and they remain per-program work.
+
+**Line counts:**
+
+| Artifact                            | Lines | Notes                          |
+|------------------------------------ |-------|------------------------------- |
+| [proof-factorial-spec.lisp](proof-factorial-spec.lisp) (v1)   | 433   | ad-hoc induction, no lifter   |
+| [proof-factorial-v2.lisp](proof-factorial-v2.lisp) (v2)       | 447   | uses lifter                    |
+| [wasm-loop-lifter.lisp](wasm-loop-lifter.lisp)                | 279   | generic, one-time cost         |
+| Axe `factorial-elf64.lisp`          | ~100  | full pipeline, for comparison  |
+
+v2 is *longer* than v1. The generic machinery moved into
+`wasm-loop-lifter.lisp` (~100 lines net), but was replaced on the
+user side by ~100 lines of witness defuns + constraint theorems.
+Net zero.
+
+### D.3  The one genuine lesson — `:functional-instance` gotcha
+
+The `:functional-instance` hint silently fell back to induction for
+a long time. The cause: ACL2's preprocessor rewrites
+`storep` → `funcinst-listp`, `current-operand-stack` → the
+`frame->operand-stack (top-frame (state->call-stack …))` chain, and
+reduces `(fac-iter-fuel)` / `(fac-exit-fuel)` to `13` / `4` via
+executable-counterparts, before the exported constraint rules are
+matched. This breaks syntactic matching for the non-trivial
+constraints (`ll-iter-step`, `ll-exit-step`, `statep-of-…`).
+
+Working incantation:
+
+```lisp
+:hints (("Goal"
+         :use ((:functional-instance ll-loop-correct
+                (ll-input-ok fac-vars-ok) … ))
+         :in-theory (disable fac-vars-ok fac-exit? fac-next fac-result
+                             fac-measure fac-iter-fuel fac-exit-fuel
+                             make-fac-header
+                             storep
+                             current-operand-stack current-instrs
+                             current-label-stack
+                             (:executable-counterpart fac-iter-fuel)
+                             (:executable-counterpart fac-exit-fuel)))
+        ("Goal'"
+         :expand ((fac-loop-fn vars) (fac-total-fuel vars))))
+```
+
+Diagnosis technique: when `:use (:functional-instance …)` fails,
+ACL2 prints `Subgoal N.M` checkpoints under the main goal with
+"*** Key checkpoint before reverting to proof by induction: ***".
+Subgoal numbering is in **reverse order** of the exported
+constraints. Inspect the first unsolved constraint and look for
+which accessor / definition was unfolded away from the expected
+pattern.
+
+This finding is worth keeping (see
+[/memories/repo/wasm-loop-lifter.md](../../../memories/repo/wasm-loop-lifter.md))
+regardless of whether we take the encapsulate-witness approach
+again.
+
+### D.4  What to do instead if we resume
+
+The Axe `lift-subroutine` macro is ~1000 lines in Axe and relies on
+an entire DAG-based symbolic executor. Rebuilding that for WASM is a
+major engineering effort. Pragmatic intermediate steps, in
+increasing order of ambition:
+
+**Option A — Mechanical extractor, no theorem.** Write a small
+function `(wasm-extract-loop-body *fac-func* :offset N :len M)` that
+slices the loop body directly from the `funcinst->body` rather than
+copying it into the proof source. This removes items (1) and (2) of
+the per-program boilerplate but does nothing for (3)–(6). Est. 50-line
+reduction, no semantic change.
+
+**Option B — Loop-body symbolic executor.** A tactic that, given a
+loop body and a header-state shape, *computes* the iter-step and
+exit-step lemmas by symbolic execution of `run`. This is what the
+`:expand ((:free (n s) (run n s)))` pattern already does inside a
+proof; lifting it into a `defthmd`-generator would eliminate items
+(2)–(3). Est. 150–200 line reduction per proof, plus ~500 lines of
+one-time tool cost.
+
+**Option C — Full `lift-wasm-loop` macro.** Given
+`*fac-func*`, a loop offset, and `:measure`, generate all of
+`fac-*` defuns, all 11 constraint theorems, the three
+symbolic-execution lemmas, and the functional-instantiation call.
+This matches Axe's `lift-subroutine` in scope. Est. 1000+ lines of
+tool code; per-proof cost drops to the Axe level (~30 lines: measure
+annotation, connection lemma, final theorem).
+
+**Option D — Abandon encapsulate, use Axe's DAG framework.** The
+correct structural move is to port Axe's x86 loop lifter to WASM
+semantics, reusing its DAG simplifier, `:loops` annotation syntax,
+`apt::tailrec`, `apt::drop-irrelevant-params`, etc. This is the
+architecture the Axe example proves. It is also the largest
+investment.
+
+### D.5  What the v2 artifacts are good for
+
+- **`wasm-loop-lifter.lisp` as-is** still has value as a _target_:
+  if we ever build option B or C, the generated per-program
+  functional-instance call has somewhere to land.
+- **`proof-factorial-v2.lisp`** is a worked example of exactly
+  what the tool-generated output would look like. Keep it as a
+  reference for shape.
+- Neither should be treated as a template to be hand-copied for
+  other loops; that would propagate the boilerplate problem.
+
+### D.6  Disposition
+
+- Keep both files certified so the infrastructure is preserved
+  (`wasm-loop-lifter.cert`, `proof-factorial-v2.cert`).
+- Do **not** retrofit `proof-gcd-spec.lisp` onto the lifter — v1 is
+  fine and the lifter doesn't buy us anything at GCD's one-loop size
+  either.
+- Next real step: decide between Option B (loop-body sym-ex tactic)
+  or Option D (port Axe) before writing another per-program proof.
+  Until that decision, v1-style ad-hoc proofs remain the cheaper
+  path per program.
