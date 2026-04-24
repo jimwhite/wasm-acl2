@@ -1,4 +1,4 @@
-# ATC → Verified C WASM Interpreter — Design Plan
+# ATC → Verified C WASM Interpreter — Design Plan (rev 2)
 
 **Goal.** Use Kestrel's ATC (ACL2-to-C) to emit a C implementation of a
 WASM interpreter whose correctness against `execution.lisp` is proved
@@ -6,465 +6,325 @@ by construction, and whose executable can run the `.wat`/`.wasm`
 programs already in [tests/oracle/](tests/oracle/) — producing the
 same values the V8 oracle produces.
 
-This document is planning only. Scope it, cut it, approve it, then
-build.
+**Revisions in rev 2:**
+- We are **not** writing a new binary decoder. The Kestrel WASM books
+  already ship `books/kestrel/wasm/parse-binary.lisp` (1429 LOC, LEB128,
+  full WASM 1.0 binary format) and we already depend on it.
+- **Every milestone ends with "compile the C, run it, diff against
+  V8."** No preparatory work lands without a runnable artifact that
+  demonstrates it was worth doing.
 
 ---
 
-## 1. What ATC gives us (and doesn't)
+## 1. ATC — what it supports and doesn't
+
+Confirmed from `books/kestrel/c/atc/`:
 
 ### Supports
+- Integer types (`schar` … `ullong`) with tight guards, overflow, all
+  bitwise/shift ops.
+- Structs (`defstruct`), arrays, pointers, pointed integers.
+- Loops via tail recursion; conditionals; local variables; function
+  calls; external objects (`defobject`).
 
-Confirmed from `books/kestrel/c/atc/` (tests + pretty-printer):
+### Does not support
+- **Floating point.** `pretty-printer.lisp` raises on float constants.
+  Blocks f32/f64 programs until upstream ATC grows float emission.
+- General recursion, symbols, quasiquote, alists, dynamic allocation,
+  unions, variadics.
 
-- Integer types: `schar`, `uchar`, `sshort`, `ushort`, `sint`, `uint`,
-  `slong`, `ulong`, `sllong`, `ullong` — with tight guards, overflow
-  handling, and all bitwise/shift ops.
-- Structs (`defstruct`), including nested.
-- Arrays (`uchar-array`, etc.), both read and write; passed as
-  pointers with explicit length guards.
-- Pointers (`pointer-types`, `pointed-integers`).
-- Loops via tail recursion (`loops.lisp` in tests).
-- Conditionals, sequencing, local variables, function calls.
-- External objects (`defobject`) for global-ish state that C sees as a
-  top-level variable or passed pointer.
-
-### Does NOT support (current constraints)
-
-- **Floating point.** The pretty-printer has:
-  `:float (prog2$ (raise "Internal error: floating constants not supported.") …)`.
-  There is `float`/`double` as a type name, but no emission path for
-  f32/f64 operations. **This is the single biggest issue for WASM.**
-- General recursion (tail recursion only).
-- Symbols, quasiquotes, alists, `cons`-based lists. Data has to be
-  structs and arrays.
-- Dynamic allocation / `malloc`. Every array size has to be a static
-  ceiling on the ACL2 side.
-- Unions.
-- Variadic functions.
-
-### What this implies for us
-
-Every single line of `execution.lisp` today uses symbols
-(`'i32.add`, `'i32.const`), quasiquote shapes (`` `(:i32.const ,x) ``),
-and alists (frames, stores). None of that is ATC-compatible. A WASM
-interpreter for ATC has to be a **second implementation** written in
-ATC's C-friendly ACL2 subset, and we prove it equivalent to the
-current spec.
+This forces the WASM interpreter used for ATC to be a **second
+implementation** in the ATC-friendly subset, linked to the spec in
+`execution.lisp` by a refinement proof (milestone M6 below).
 
 ---
 
 ## 2. Scope cuts for v0
 
-To get *something* running the oracle examples end-to-end, we cut
-aggressively:
-
-1. **Integer-only.** Run the subset of oracle programs that do not use
-   floats: `gcd`, `sum_array`, `hash`, `collatz`, `is_prime`,
-   `packed_mem`, `factorial`, and anything else that only touches
-   i32/i64. Defer `float_ops`, `inf_arith_oracle`, `nan_oracle`,
-   `signed_zero_oracle` until ATC grows float support (or we add a
-   trusted C stub for that subset).
-2. **Single module, single instance.** No multi-module linking for v0.
-3. **No host imports.** Oracle examples don't use any.
-4. **Interpreter only.** No JIT, no ahead-of-time compilation.
-5. **Bounded everything.** Operand stack, label stack, call stack,
-   locals, memory all have compile-time maxima. Programs exceeding
-   them trap cleanly.
-6. **Eager decode.** Pre-decode the whole binary into a struct-of-arrays
-   representation before execution starts. Keeps the step function
-   free of binary-format parsing.
-
-Under these cuts, v0 passes 7–9 of the ~12 oracle programs. That's
-enough to demonstrate the methodology.
+1. **Integer-only subset of oracle programs:** `gcd`, `sum_array`,
+   `hash`, `collatz`, `is_prime`, `packed_mem`, `factorial`,
+   `call_indirect`, `edge_cases` (non-float parts). Floats deferred
+   until ATC upstream grows float support (milestone M8).
+2. Single module, single instance; no host imports; interpreter only;
+   all stacks/memory bounded at compile time.
 
 ---
 
 ## 3. Architecture
 
-Three layers, each a separate book:
-
 ```
-┌───────────────────────────────────────────────┐
-│ execution.lisp (spec, unchanged)              │  Layer 0 — ground truth
-│   - Symbolic AST, run, statep, …              │
-└───────────────────────────────────────────────┘
-            ▲
-            │ refinement theorem (Layer 2)
-            │
-┌───────────────────────────────────────────────┐
-│ execution-atc.lisp                            │  Layer 1 — ATC-ready mirror
-│   - defstruct state                           │
-│   - enumerated opcodes                        │
-│   - tail-recursive run-atc                    │
-│   - same step function; sint/uint everywhere  │
-└───────────────────────────────────────────────┘
-            ▲
-            │ ATC emits
-            │
-┌───────────────────────────────────────────────┐
-│ wasm_vm.c  +  wasm_vm.h  (generated)          │  Layer 2 — C output
-│   + proofs that wasm_vm.c refines             │
-│     execution-atc.lisp                        │
-└───────────────────────────────────────────────┘
-```
+┌────────────────────────────────────────────────┐
+│ execution.lisp            (unchanged)          │  L0  — spec
+└────────────────────────────────────────────────┘
+        ▲
+        │ refinement theorem (milestone M6)
+        │
+┌────────────────────────────────────────────────┐
+│ execution-atc.lisp                             │  L1  — ATC mirror
+│   - struct-of-arrays state                     │
+│   - enumerated opcodes                         │
+│   - tail-recursive step-atc                    │
+└────────────────────────────────────────────────┘
+        ▲  emits
+┌────────────────────────────────────────────────┐
+│ wasm_vm.c  +  wasm_vm.h    (generated by ATC)  │  L2
+│ + ACL2 theorems that wasm_vm.c == step-atc     │
+└────────────────────────────────────────────────┘
 
-Plus two glue artifacts that live outside ATC:
+Glue (lives outside ATC):
 
-```
-┌───────────────────────────────────────────────┐
-│ decoder.c  (hand-written, trusted)            │
-│   - Reads .wasm bytes, fills the structs      │
-│     that wasm_vm.c expects                    │
-└───────────────────────────────────────────────┘
-┌───────────────────────────────────────────────┐
-│ main.c (hand-written)                         │
-│   - CLI: read .wasm, call wasm_vm_invoke,     │
-│     print return value                        │
-└───────────────────────────────────────────────┘
+  parse-binary.lisp   kestrel/wasm   — already in-tree WASM binary
+                                       parser (1429 LOC). We CALL it,
+                                       not rewrite it.
+
+  module-lower.lisp   new            — runs at build time in ACL2:
+                                       calls parse-binary on a .wasm,
+                                       lowers the result to our flat
+                                       struct-of-arrays form, and
+                                       emits a C header containing
+                                       the module as initialized
+                                       struct literals.
+
+  main.c              new, ~200 LOC  — reads compiled-in module,
+                                       parses argv, calls
+                                       wasm_vm_invoke, prints result.
 ```
 
-The **trust base** is: ATC + our C compiler + `decoder.c` + `main.c`.
-The ACL2 interpreter in `execution.lisp` and the refinement proof
-reduce `wasm_vm.c` to the spec; the decoder and main are small and
-testable against the oracle.
+**Key move.** Binary decoding happens in ACL2 *at build time* using the
+Kestrel parser. The VM itself ships each program as a C header of
+initialized struct literals. No runtime decoder for milestones M1–M4;
+runtime loading is added in M5 as a thin wrapper that fills the same
+struct shape. This is the pattern Kestrel's own ATC examples use.
+
+**Trust base for M4:**
+- ATC itself
+- Our C compiler
+- `main.c` (trivial CLI)
+- The build script that runs `parse-binary` + `module-lower` offline
+  and writes the header
+
+`execution.lisp` + refinement proof (M6) reduce `wasm_vm.c` to the
+spec. `parse-binary.lisp` is already a formal ACL2 artifact; its
+verification quality is upstream's problem, and we can tighten our
+trust story further in M7 by ATC-compiling it too.
 
 ---
 
-## 4. Data representation
+## 4. Milestones — each ends with a runnable artifact
 
-This is where most of the design lives. ATC hates symbols and cons
-cells; it loves structs and arrays.
+### M1. ATC feasibility probe: `./gcd` — ~3 days
 
-### State struct (proposed)
+**What.** `execution-atc-gcd-only.lisp` containing one tail-recursive
+`gcd-atc` using `uintp`. Invoke ATC. Produce `gcd.c`, `gcd.h`. Write
+`gcd-main.c` that reads two ints from argv and calls `gcd-atc`.
 
+**Demo.**
 ```
-(defstruct wasm-state
-  ;; operand stack — 64-bit slots tag a type nibble + value
-  (opstk-vals  (array u64 MAX_OPSTK))
-  (opstk-tags  (array u8  MAX_OPSTK))     ; 0=i32 1=i64 2=f32 3=f64
-  (opstk-top   uint)
-
-  ;; label stack — one entry per active block/loop/if
-  (labels-arity     (array u8    MAX_LABELS))
-  (labels-is-loop   (array u8    MAX_LABELS))     ; 0/1 bool
-  (labels-cont-ip   (array uint  MAX_LABELS))     ; IP to jump to on br
-  (labels-end-ip    (array uint  MAX_LABELS))
-  (labels-top       uint)
-
-  ;; call stack — one entry per active function invocation
-  (frames-fn-idx    (array uint  MAX_FRAMES))
-  (frames-ip        (array uint  MAX_FRAMES))
-  (frames-locals-base (array uint MAX_FRAMES))
-  (frames-top       uint)
-
-  ;; locals — flat arena, each frame has a slice
-  (locals-vals (array u64 MAX_LOCALS_TOTAL))
-  (locals-tags (array u8  MAX_LOCALS_TOTAL))
-
-  ;; linear memory
-  (mem-bytes   (array u8  MAX_MEM_BYTES))
-  (mem-size    uint)
-
-  ;; status
-  (status      u8))                         ; 0=running 1=done 2=trap
+$ make gcd
+$ ./gcd 48 18
+6
+$ node tests/oracle/check-all.mjs | grep gcd    # same values
 ```
 
-### Pre-decoded module
+**Exit criterion.** `./gcd` matches V8 for every gcd oracle case.
+**If this fails, stop** and talk to Kestrel before any further work.
 
+### M2. WASM state struct + 5 opcodes, running a hand-curated program — ~1.5 weeks
+
+**What.**
+- `wasm-state` defstruct (operand stack, label stack, frames, locals;
+  no memory yet).
+- `wasm-module` defstruct (opcode array + immediates + function
+  entries).
+- Opcodes: `i32.const`, `i32.add`, `i32.sub`, `i32.mul`, `end`.
+- Tail-recursive `step-atc` dispatching on opcode.
+- A hand-written `module_const_add.h` encoding
+  `(func (param i32 i32) (result i32) local.get 0 local.get 1 i32.add end)`
+  in our struct format (no parser involvement yet — this validates the
+  VM independently of the lowering step).
+
+**Demo.**
 ```
-(defstruct wasm-module
-  ;; decoded instructions, flattened across all functions
-  (instrs-op    (array u8   MAX_INSTRS))     ; opcode enum (0..NUM_OPS)
-  (instrs-imm1  (array u32  MAX_INSTRS))     ; first immediate (or 0)
-  (instrs-imm2  (array u32  MAX_INSTRS))     ; second immediate
-  (fn-entry-ip  (array uint MAX_FUNCS))      ; IP where each fn starts
-  (fn-num-locals (array u8  MAX_FUNCS))
-  (fn-arity     (array u8  MAX_FUNCS))
-  ;; …table, types, exports…
-  )
-```
-
-This is effectively a bytecode VM, not a tree-walking AST
-interpreter. The spec in `execution.lisp` is tree-walking; the
-equivalence proof (§6) bridges the two.
-
-### Opcode enumeration
-
-```
-(defconst *op-unreachable* 0)
-(defconst *op-nop*         1)
-(defconst *op-block*       2)
-(defconst *op-loop*        3)
-(defconst *op-br*          4)
-(defconst *op-br-if*       5)
-(defconst *op-br-table*    6)
-(defconst *op-end*         7)
-(defconst *op-return*      8)
-(defconst *op-call*        9)
-(defconst *op-call-indirect* 10)
-(defconst *op-drop*        11)
-(defconst *op-select*      12)
-(defconst *op-local-get*   13)
-(defconst *op-local-set*   14)
-(defconst *op-local-tee*   15)
-(defconst *op-i32-const*   16)
-(defconst *op-i32-add*     17)
-;; …one per WASM 1.0 instruction we support in v0
+$ ./wasm_vm_const_add 2 3
+5
 ```
 
-Integers, not symbols. The decoder translates the binary's WASM opcode
-bytes into these (the mapping is 1:1 for single-byte opcodes and
-mostly-1:1 for the prefixed ones).
+**Exit criterion.** ATC-generated C produces 5 for 2+3 and matches V8
+on a hand-curated `.wat` with only these opcodes.
+
+### M3. Loops + branches, running `factorial.wasm` end-to-end — ~2 weeks
+
+**What.**
+- Add `local.get`, `local.set`, `block`, `loop`, `br`, `br_if`, `end`
+  with label semantics, `i32.eqz`.
+- Wire up the Kestrel parser: `module-lower.lisp` is a build-time ACL2
+  script that
+  (a) runs `parse-binary` on a given `.wasm`,
+  (b) walks the parser's structured output,
+  (c) emits `module_<name>.h` containing our struct literals.
+- `main.c` is linked with whichever `module_*.h` was selected.
+
+**Demo.**
+```
+$ make module_factorial.h       # runs ACL2 parser + lowering
+$ make wasm_vm_factorial
+$ for n in 0 1 2 5 10 12; do
+    printf "n=%s  vm=%s  v8=%s\n" \
+      "$n" "$(./wasm_vm_factorial $n)" "$(node -e 'WebAssembly.instantiate(...)' )"
+  done
+# all equal
+```
+
+**Exit criterion.** Output matches V8 on the full factorial oracle
+table; header is generated from the real `.wasm`, not hand-written.
+
+### M4. Full integer WASM 1.0, full integer oracle passing — ~4 weeks
+
+**What.**
+- Remaining i32/i64 opcodes: shifts, rotates, comparisons, conversions,
+  load/store (8/16/32-bit, signed/unsigned), `br_table`, `call`,
+  `call_indirect`, `return`, `select`, `drop`, `local.tee`, globals.
+- Linear memory added to `wasm-state`.
+- `module-lower.lisp` extended to cover all these forms.
+
+**Demo.**
+```
+$ make oracle-verified
+PASS  gcd(48,18)=6              vm=6        v8=6
+PASS  sum_array(0,5)=150         vm=150      v8=150
+PASS  hash("Hi")=5862390         vm=5862390  v8=5862390
+PASS  collatz(27)=111            vm=111      v8=111
+PASS  is_prime(97)=1             vm=1        v8=1
+PASS  factorial(10)=3628800      vm=3628800  v8=3628800
+PASS  packed_mem.load8_u(0)=171  vm=171      v8=171
+PASS  call_indirect(…)           vm=…        v8=…
+```
+
+**Exit criterion.** `make oracle-verified` passes in CI. Diffs V8 vs our
+VM for every integer `.wat` and exits non-zero on any mismatch.
+
+### M5. Runtime `.wasm` loading — ~1 week
+
+**What.** Until now each program had its module baked in. Now make the
+VM generic: a small `load_module.c` reads a `.wasm` at runtime and fills
+the struct arrays in the shape `module-lower.lisp` produces offline.
+
+This loader is trusted; the alternative (ATC-compiling the full
+parser) is M7.
+
+**Demo.**
+```
+$ ./wasm_vm tests/oracle/factorial.wasm fac 10
+3628800
+$ ./wasm_vm <any-integer-only.wasm> <fn> <args...>
+```
+
+**Exit criterion.** One VM binary, handed any integer `.wasm` in the
+oracle set, matches V8.
+
+### M6. Refinement proof: `execution-atc` refines `execution.lisp` — ~8 weeks, overlappable
+
+**What.**
+- `match-state` abstraction from flat struct → tree-of-alists spec
+  state.
+- Per-opcode simulation lemmas (~60).
+- Structural lemmas (operand/label/frame stack ops, IP advance, branch
+  target resolution).
+- Main theorem:
+  `(match-state s-atc s-spec) ⇒ (match-state (step-atc s-atc m) (run s-spec))`
+  extended by fuel induction.
+
+This milestone **runs in parallel with M4 and M5** once M2 has
+stabilized the state struct. Each new opcode in M3/M4 comes with its
+per-opcode lemma in M6 before the opcode is called "done."
+
+**Demo.** `make oracle-verified` stays green throughout. New
+`make refinement-proof` target certifies the ACL2 books.
+
+**Exit criterion.** Main refinement theorem certifies; no
+`skip-proofs`; oracle suite still green.
+
+### M7. (Optional) ATC-compiled parser — ~4 weeks
+
+**What.** Compile `parse-binary.lisp` through ATC, producing
+`parse_binary.c`. Replace the trusted `load_module.c`. Trust base
+shrinks; decoder correctness follows from ATC + the Kestrel parser's
+existing verification.
+
+**Demo.** Same behavior as M5, but `./wasm_vm` now uses the generated
+decoder.
+
+### M8. (Blocked upstream) Floats
+
+**What.** When ATC grows f32/f64 emission, add float state + opcodes;
+rerun the full oracle including `float_ops`, `nan_oracle`,
+`inf_arith_oracle`, `signed_zero_oracle`.
+
+**Fallback if upstream ATC doesn't ship floats:** hand-write
+`wasm_floats.c` (~500 LOC), test it against V8 via a fuzzer (not
+formal proof), link it in. Weakens trust for float programs only.
 
 ---
 
-## 5. The step function
+## 5. Build matrix — definition of done per milestone
 
-One tail-recursive ACL2 function:
-
-```
-(defun step-atc (s m fuel)
-  (declare (xargs :guard (and (wasm-statep s)
-                              (wasm-modulep m)
-                              (uintp fuel))
-                  :measure (nfix fuel)))
-  (if (or (zp fuel)
-          (not (eq (wasm-state->status s) *status-running*)))
-      s
-    (let* ((frame-top (wasm-state->frames-top s))
-           (ip        (aref (wasm-state->frames-ip s) (- frame-top 1)))
-           (op        (aref (wasm-module->instrs-op m) ip)))
-      (cond ((= op *op-i32-add*)
-             (step-atc (do-i32-add s) m (- fuel 1)))
-            ((= op *op-i32-mul*)
-             (step-atc (do-i32-mul s) m (- fuel 1)))
-            ;; …one branch per opcode…
-            (t
-             (step-atc (trap s) m (- fuel 1)))))))
-```
-
-Each `do-i32-*` is ~5 lines of pure array manipulation (pop two,
-compute, push one, advance IP). ATC turns this into a `while` loop
-with a switch.
-
-**Top-level entry point (also ATC-compiled):**
-
-```
-(defun wasm-vm-invoke (m fn-idx arg0 arg1)
-  (declare (xargs :guard …))
-  (let ((s (wasm-initial-state m fn-idx arg0 arg1)))
-    (let ((s (step-atc s m (wasm-fuel-bound)))) ;; large constant
-      (wasm-state-result s))))
-```
-
-The C signature becomes `uint64_t wasm_vm_invoke(wasm_module *m,
-unsigned fn_idx, uint32_t a0, uint32_t a1)` (or similar — we'll
-generate several arities, since ATC requires a fixed signature per
-function).
-
----
-
-## 6. The refinement proof
-
-This is the hard part. Theorem goal:
-
-```
-(defthm execution-atc-refines-execution
-  (implies (and (wasm-statep s-atc)
-                (wasm-modulep m)
-                (match-state s-atc s-spec m-spec))
-           (match-state (step-atc s-atc m fuel)
-                        (run fuel s-spec)
-                        m-spec)))
-```
-
-where `match-state` is an abstraction function relating the flat
-struct-of-arrays representation to the tree-of-alists representation
-in `execution.lisp`. The decoder gives the `match-state` premise at
-module-load time.
-
-**Strategy.** Prove one opcode at a time:
-
-```
-(defthm step-atc-i32-add
-  (implies (match-state s-atc s-spec m-spec)
-           (match-state (do-i32-add s-atc)
-                        (execute-instr '(:i32.add) s-spec)
-                        m-spec)))
-```
-
-~60 of these (one per supported opcode) plus ~10 structural ones
-(operand stack push/pop, label push/pop, frame push/pop, IP advance,
-branch target resolution). Each is mechanical given a good
-`match-state` definition.
-
-**Then the main theorem** is by induction on fuel, using the per-opcode
-lemmas as rewrite rules.
-
-**Effort estimate.** The per-opcode lemmas are copy-paste-intensive
-but individually shallow. Plan ~2 months for the full WASM 1.0
-integer subset, assuming we've already built `match-state` and proved
-5–10 representative opcodes as templates.
-
----
-
-## 7. Running the oracle
-
-Once `wasm_vm.c` is generated and a hand-written `decoder.c` + `main.c`
-link around it, the oracle harness becomes a direct comparison:
-
-```
-for wat in tests/oracle/*.wat; do
-  wat2wasm "$wat" -o /tmp/$(basename $wat .wat).wasm
-  node tests/oracle/check-all.mjs    # V8 values
-  ./build/wasm_vm /tmp/*.wasm        # our verified VM values
-  diff <(node …) <(./wasm_vm …)
-done
-```
-
-A new `tests/oracle/check-all-verified.sh` would drive this.
-
-For the v0 cut (integer-only programs), expected pass rate: all 7
-integer programs currently in the oracle dir. Floats blocked until a
-later phase.
-
----
-
-## 8. Phases
-
-### Phase A — feasibility probe (≈ 1 week)
-
-Port *just* `gcd` to ATC style:
-
-- `execution-gcd-atc.lisp`: hard-codes the gcd loop as a tail-recursive
-  ACL2 function using `uintp`, not the general step function. This is
-  essentially what the Axe post-`tailrec` form of a factorial proof
-  looks like.
-- Run `atc` on it. Get `gcd.c`.
-- Compile and run; compare to V8 oracle.
-- Outcome: proves or disproves the ATC integration works at all, for
-  ~1 week of cost.
-
-### Phase B — state struct + minimum step function (≈ 3 weeks)
-
-- `wasm-state` and `wasm-module` defstructs.
-- `do-*` helpers for i32.const, i32.add, i32.sub, i32.mul, i32.eqz,
-  local.get, local.set, br_if, loop, block, end.
-- `step-atc` with those ~10 opcodes.
-- ATC-compile. Link with a hand-written decoder that handles only this
-  opcode subset.
-- Target: run `factorial.wasm` end-to-end.
-
-### Phase C — full integer WASM 1.0 (≈ 4 weeks)
-
-- All remaining i32/i64 opcodes: shifts, rotates, comparisons,
-  conversions (i32↔i64), load/store (8/16/32-bit + signed/unsigned),
-  `br_table`, `call`, `call_indirect`, `return`, `select`, `drop`,
-  `local.tee`, globals.
-- Expanded decoder.
-- Target: pass `gcd`, `sum_array`, `hash`, `collatz`, `is_prime`,
-  `packed_mem`, `factorial`, `call_indirect`, `edge_cases` (minus
-  float parts) against V8.
-
-### Phase D — refinement proof (≈ 8 weeks)
-
-- `match-state` abstraction function.
-- Per-opcode simulation lemmas.
-- Main `execution-atc-refines-execution` theorem.
-- At this point we can say each generated C function has a proof of
-  equivalence to `execution.lisp` on all inputs satisfying the
-  structural bounds.
-
-### Phase E — floats (blocked on upstream)
-
-- ATC does not currently emit float types/ops. Options:
-  1. **Wait / contribute.** Add f32/f64 to ATC's pretty-printer and
-     type system. This is upstream work at Kestrel.
-  2. **Trusted C stub.** Hand-write `float_ops.c` implementing
-     f32/f64, prove it matches `execution.lisp`'s float ops outside
-     ATC (by testing against V8, not by formal proof), and link it in.
-     Weakens the trust story for float programs only.
-- Until one of these lands, `float_ops.wat`, `inf_arith_oracle.wat`,
-  `nan_oracle.wat`, `signed_zero_oracle.wat` stay oracle-tested but
-  not run through our VM.
-
-### Phase F — performance (optional)
-
-- Benchmark against V8. Verified interpreters are typically 10–100×
-  slower than V8; expect that.
-- If it matters, consider ACL2-to-LLVM via Kestrel's newer tooling
-  once it matures, or hand-written fast paths preserved by
-  equivalence.
-
----
-
-## 9. Deliverables matrix
-
-| Artifact | Phase | Size (est.) | Verified? |
+| Milestone | Binary | Inputs | Compared against |
 |---|---|---|---|
-| `execution-gcd-atc.lisp` | A | 80 LOC | Y (guards) |
-| `gcd.c` generated | A | — | Y (ATC) |
-| `execution-atc.lisp` | B–C | ~2500 LOC | Y (guards) |
-| `wasm_vm.c` generated | B–C | ~5000 LOC | Y (ATC) |
-| `match-state` + per-op lemmas | D | ~3000 LOC | Y |
-| `execution-atc-refines-execution` | D | ~300 LOC | Y |
-| `decoder.c` | B–C | ~1000 LOC | N (trusted) |
-| `main.c` + CLI | B | ~200 LOC | N (trusted) |
-| Oracle harness | B | ~100 LOC | N |
+| M1 | `./gcd` | argv ints | V8 oracle for gcd |
+| M2 | `./wasm_vm_const_add` | argv ints | V8 on hand-authored `.wat` |
+| M3 | `./wasm_vm_factorial` | argv int | V8 on `factorial.wasm` |
+| M4 | one per oracle `.wat` | argv per program | V8 for every integer oracle program |
+| M5 | `./wasm_vm` (generic) | `.wasm` + fn + args | V8 on all integer oracle programs |
+| M6 | same as M5 | same | same; plus ACL2 refinement theorem certifies |
+| M7 | `./wasm_vm` (generic) | same | same; decoder now verified (via ATC + parse-binary) |
+| M8 | `./wasm_vm` + floats | all oracle `.wat` | V8 on full oracle |
 
-**Total verified output:** ~10 000 LOC generated C + ~3 000 LOC
-refinement proof.
-**Total trusted code:** ~1 200 LOC of decoder + CLI.
+Every row's "Compared against" column is the exit criterion. No
+milestone closes without that diff being green.
 
 ---
 
-## 10. Risks and open questions
+## 6. Deliverables
 
-- **R1 — ATC limits.** If ATC can't express something we need (e.g.,
-  16-bit signed arithmetic corner case, struct-returning functions),
-  we're blocked. Phase A is the cheap probe; if ATC can't even emit
-  `gcd`, escalate to Kestrel before committing further.
-- **R2 — Size of generated C.** ATC emits one C function per ACL2
-  function. A ~60-opcode `step-atc` with inlined helpers will produce
-  a very large function. May need to split into per-opcode C
-  functions (which means one ACL2 function per opcode); that balloons
-  the refinement proof but keeps each unit small.
-- **R3 — Pre-decode vs. on-the-fly.** Pre-decoding means the decoder
-  is untrusted (reasonable; easy to fuzz against the V8 oracle). But
-  it also means the ACL2 side reasons about the decoded form, not the
-  raw bytes. To prove "our VM on the raw bytes = V8 on the raw bytes"
-  we'd need either a verified decoder (large — WASM binary format is
-  ~20 pages of spec) or a separate decoder correctness argument.
-  Recommend: start with trusted decoder + fuzzing, revisit later.
-- **R4 — Float support in ATC.** As noted. May need upstream work.
-- **R5 — Fuel vs. real execution.** ATC-generated C will pass `fuel`
-  through as a `uint64_t` counter. That's fine for correctness but
-  wastes a register; once the proof is done, we can replace the
-  counter with an infinite-loop idiom if ATC supports it.
-- **Q1.** Do we keep `execution.lisp` as the reasoning target and
-  treat `execution-atc.lisp` as a compilation mirror, or do we make
-  `execution-atc.lisp` the primary spec and rewrite the gcd/factorial
-  proofs on top of it? The former preserves existing investment; the
-  latter would give a simpler story long-term.
-- **Q2.** Should we upstream WASM support to ATC as a motivating
-  example? Could help the float and struct-return constraints get
-  priority attention.
+| Artifact | Milestone | Size | Verified? |
+|---|---|---|---|
+| `execution-atc-gcd-only.lisp` | M1 | 80 LOC | Y (ATC + guards) |
+| `execution-atc.lisp` (full) | M2–M4 | ~2500 LOC | Y (ATC + guards) |
+| `wasm_vm.c` (generated) | M2–M4 | ~5000 LOC | Y (ATC) |
+| `module-lower.lisp` | M3–M4 | ~400 LOC | N (build-time script) |
+| `module_*.h` per program | M3–M4 | small | N (generated) |
+| `load_module.c` | M5 | ~300 LOC | N (trusted until M7) |
+| `main.c` + CLI | M2 | ~200 LOC | N (trusted) |
+| Oracle harness (Makefile + sh) | M2–M4 | ~100 LOC | N |
+| `match-state` + per-op lemmas | M6 | ~3000 LOC | Y |
+| Refinement main theorem | M6 | ~300 LOC | Y |
+| ATC-compiled parser | M7 | — | Y |
+
+**Verified output by M6:** ~8 000 LOC of generated C + ~3 000 LOC of
+proof.
+**Trusted glue by M6:** ~1 000 LOC (main, loader, build scripts).
+**Trusted glue by M7:** ~200 LOC (main + build scripts only).
 
 ---
 
-## 11. Recommendation
+## 7. Risks
 
-Do Phase A first — one week, one file. If ATC happily emits a working
-`gcd.c` from an ATC-style rewrite of the gcd loop, the rest of this
-plan is engineering. If it doesn't, we've learned the limits cheaply
-and can talk to Kestrel before committing.
+- **R1 — ATC can't emit the shape we need.** M1 is the cheap probe; if
+  `gcd.c` doesn't come out cleanly, stop before M2.
+- **R2 — `step-atc` too big to emit as one C function.** Split into
+  per-opcode ACL2 functions → per-opcode C functions. Larger refinement
+  proof but cleaner C. Detected in M2.
+- **R3 — Kestrel parser's output shape awkward for lowering.**
+  Detected in M3. Mitigated by doing lowering in ACL2 (any shape can be
+  walked there).
+- **R4 — Float gap.** Known; M8.
+- **R5 — Performance.** Verified interpreters are typically 10–100×
+  slower than V8; expected and acceptable.
 
-After Phase A:
+---
 
-- If success → Phase B (state struct + 10 opcodes + factorial).
-- Phase D (refinement proof) can be started in parallel with Phase C
-  once the state struct stabilizes; it's the long pole.
-- Phase E (floats) is deferred until ATC upstream has float emission,
-  or we decide to weaken the trust story for floats via a trusted
-  stub.
+## 8. Recommendation
+
+Do M1 this week. One ACL2 file, one ATC invocation, one binary, one
+diff against V8. If that lands, we have proof the pipeline works and
+the rest is engineering driven by a runnable artifact at every step.
