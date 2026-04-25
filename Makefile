@@ -147,27 +147,23 @@ codegen-oracle: codegen-run
 # ---- wasm-vm2 runner ------------------------------------------------------
 #
 # run_vm2 links against codegen/wasm-vm2.c and dispatches into invoke_v2
-# (block-structured, default) or invoke (flat, kept for reference) based on
-# a `--vm v1|v2` flag.
+# (block-structured execution over the precomputed CFG).
 
 codegen/run_vm2: codegen/wasm-vm2.c codegen/wasm-vm2.h codegen/run_vm2_main.c
 	$(CC) $(CFLAGS) -Icodegen codegen/wasm-vm2.c codegen/run_vm2_main.c -o $@
 
 codegen-run-vm2: codegen/run_vm2 $(WASM_BINARIES)
 	@set -e; \
-	for vm in v2 v1; do \
-	  echo "=== --vm $$vm ==="; \
-	  for f in $(CODEGEN_FIXTURES); do \
-	    wasm=$$(echo $$f | cut -d: -f1); \
-	    name=$$(echo $$f | cut -d: -f2); \
-	    a=$$(echo $$f | cut -d: -f3); \
-	    b=$$(echo $$f | cut -d: -f4); \
-	    exp=$$(echo $$f | cut -d: -f5); \
-	    got=$$(./codegen/run_vm2 --vm $$vm $$wasm $$name $$a $$b); \
-	    printf "%-9s %-16s a=%-7s b=%-4s got=%-8s exp=%-8s " \
-	           "$$name" "`basename $$wasm`" "$$a" "$$b" "$$got" "$$exp"; \
-	    if [ "$$got" = "$$exp" ]; then echo OK; else echo FAIL; fi; \
-	  done; \
+	for f in $(CODEGEN_FIXTURES); do \
+	  wasm=$$(echo $$f | cut -d: -f1); \
+	  name=$$(echo $$f | cut -d: -f2); \
+	  a=$$(echo $$f | cut -d: -f3); \
+	  b=$$(echo $$f | cut -d: -f4); \
+	  exp=$$(echo $$f | cut -d: -f5); \
+	  got=$$(./codegen/run_vm2 $$wasm $$name $$a $$b); \
+	  printf "%-9s %-16s a=%-7s b=%-4s got=%-8s exp=%-8s " \
+	         "$$name" "`basename $$wasm`" "$$a" "$$b" "$$got" "$$exp"; \
+	  if [ "$$got" = "$$exp" ]; then echo OK; else echo FAIL; fi; \
 	done
 
 clean:

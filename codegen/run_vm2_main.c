@@ -3,13 +3,11 @@
  *
  *   fread -> wasm_buf[65536]
  *         -> parse_module(&m)
- *         -> [v2 default] extract_cfg(&w, &m); invoke_v2(&st, &m, a, b, &w)
- *         -> [v1 ref]     invoke(&st, &m, a, b)
+ *         -> extract_cfg(&w, &m)
+ *         -> invoke_v2(&st, &m, a, b, &w)
  *         -> unsigned int result
  *
- * Usage: run_vm2 [--vm v1|v2] FILE.wasm EXPORT_NAME ARG1 ARG2
- *   --vm v2 (default): block-structured path with precomputed CFG.
- *   --vm v1          : flat dispatcher (kept only for reference).
+ * Usage: run_vm2 FILE.wasm EXPORT_NAME ARG1 ARG2
  */
 
 #include <stdio.h>
@@ -45,34 +43,17 @@ static int export_name_matches(const struct wmod *m, const char *query) {
 }
 
 int main(int argc, char **argv) {
-    int use_v2 = 1;
-    int argi = 1;
-    if (argi < argc && strcmp(argv[argi], "--vm") == 0) {
-        if (argi + 1 >= argc) {
-            fprintf(stderr, "run_vm2: --vm requires v1 or v2\n");
-            return 2;
-        }
-        if (strcmp(argv[argi + 1], "v1") == 0) use_v2 = 0;
-        else if (strcmp(argv[argi + 1], "v2") == 0) use_v2 = 1;
-        else {
-            fprintf(stderr, "run_vm2: unknown --vm value '%s' (want v1 or v2)\n",
-                    argv[argi + 1]);
-            return 2;
-        }
-        argi += 2;
-    }
-
-    if (argc - argi != 4) {
+    if (argc != 5) {
         fprintf(stderr,
-                "usage: %s [--vm v1|v2] FILE.wasm EXPORT_NAME ARG1 ARG2\n",
+                "usage: %s FILE.wasm EXPORT_NAME ARG1 ARG2\n",
                 argv[0]);
         return 2;
     }
 
-    const char *wasm_path = argv[argi];
-    const char *export_query = argv[argi + 1];
-    unsigned int a = (unsigned int) strtoul(argv[argi + 2], NULL, 0);
-    unsigned int b = (unsigned int) strtoul(argv[argi + 3], NULL, 0);
+    const char *wasm_path = argv[1];
+    const char *export_query = argv[2];
+    unsigned int a = (unsigned int) strtoul(argv[3], NULL, 0);
+    unsigned int b = (unsigned int) strtoul(argv[4], NULL, 0);
 
     if (load_wasm(wasm_path) < 0) return 1;
 
@@ -88,14 +69,9 @@ int main(int argc, char **argv) {
     }
 
     struct wst st = { 0 };
-    unsigned int r;
-    if (use_v2) {
-        struct wcfg w = { 0 };
-        extract_cfg(&w, &m);
-        r = invoke_v2(&st, &m, a, b, &w);
-    } else {
-        r = invoke(&st, &m, a, b);
-    }
+    struct wcfg w = { 0 };
+    extract_cfg(&w, &m);
+    unsigned int r = invoke_v2(&st, &m, a, b, &w);
     printf("%u\n", r);
     return 0;
 }
