@@ -4,7 +4,10 @@
 > opcode coverage to start, but execution is **block-structured** rather
 > than per-opcode-dispatched.
 >
-> Status: **planning / Phase 1 in progress** (branch `vm`).
+> Status: **Phase 3 complete** (branch `vm`, head `cd7c55b`).
+> Phases 1, 2 (a/b/c), and 3 are landed; Phase 4 (LEB128 + new opcodes
+> + new fixture) remains. See bottom of this doc for the Phase 4 picking-up
+> notes.
 
 ## Why
 
@@ -197,6 +200,55 @@ C is shorter and contains no fuel decrement in straight-line arms.
 
 **Exit criteria**: A new fixture with constants > 127 runs correctly
 through v2.
+
+#### Phase 4 picking-up notes (post-Phase-3, branch `vm`)
+
+Current vm2 SL coverage in `|exec_blocks|` is the original 5 ops:
+`0x20 local.get`, `0x21 local.set`, `0x22 local.tee`, `0x45 i32.eqz`,
+`0x70 i32.rem_u` (all single-byte LEB only — pc advances by 1 or 2).
+Factorial / is_prime / collatz fail because they need `0x41 i32.const`,
+`0x6a/6b/6c i32.add/sub/mul`, plus `0x49 i32.lt_u`, `0x4f i32.le_u`,
+`0x6e i32.div_u`, `0x0f return`, `0x04/05 if/else` — none of which vm2
+has. gcd is the only fixture that exercises the current SL set.
+
+Two orthogonal sub-tasks:
+
+1. **Opcode breadth.** Mirror the `0x70 i32.rem_u` arm pattern for
+   `0x6a/6b/6c` (binops over operand stack, pc+=1, no immediate).
+   Mirror `0x20 local.get` pattern for `0x41 i32.const` (push immediate,
+   pc+=2 with 1-byte LEB simplification). All four fit cleanly into the
+   existing measure since pc advances every step. Adding `0x49 i32.lt_u`
+   etc. is the same shape; `0x0f return` and `0x04/05 if/else` need CF
+   plumbing (return: jump to function epilogue; if/else: another bracket
+   kind in `|wcfg|`).
+
+2. **LEB128 baking.** Current SL arms read 1-byte immediates inline
+   from `wasm_buf[pc+1]`, which caps `i32.const` and `local.*` indices
+   at 63 / 127. Two viable shapes:
+   - **Per-instruction sparse table**: extend `|wcfg|` with a parallel
+     `(|imm_pc| (c::sint 256))` + `(|imm_val| (c::sint 256))` pair;
+     `|extract_cfg$loop|` records each immediate-bearing PC + decoded
+     value in the next free slot; SL arms call a new `|wcfg_imm_at|
+     pc w` helper (mirroring `|wcfg_end_pc_at|`). Keeps SL arms simple,
+     adds linear scan per use.
+   - **Inline decode**: SL arms read up to 5 bytes and shift-or them.
+     No new wcfg state; complicates each SL arm with a 5-iter loop
+     (would need its own `$loop` helper to satisfy ATC).
+
+   Sparse table is more aligned with the "bake at parse time" intent
+   and uses the same `wcfg_*_at` lookup pattern that already proved out.
+   Pick a generous N (256 imm slots covers ~256 imm-bearing ops in a
+   function body, vs the 64-bracket cap on opener arrays).
+
+3. **New fixture for the exit criterion.** Smallest viable: a function
+   `(local.get 0) + (i32.const 200)` returning u32. Build alongside
+   factorial/is_prime/collatz in `tests/oracle/`. Adds one line each to
+   the WAT-binaries Makefile target and to `CODEGEN_FIXTURES`.
+
+Measure-proof note: any new SL arm that advances pc by k>0 leaves the
+lex measure `(fuel*70000 + (60000-pc))` strictly decreasing without
+needing hint changes. Any new CF arm that decrements fuel by 1 likewise
+fits under the existing 70000-multiplier slack.
 
 ## Open design questions
 
