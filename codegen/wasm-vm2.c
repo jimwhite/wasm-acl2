@@ -140,6 +140,17 @@ void extract_cfg(struct wcfg *w, struct wmod *m) {
     }
 }
 
+int wcfg_end_pc_at(int pc, struct wcfg *w) {
+    int i = 0;
+    int acc = 0;
+    while (w->nbr >= 0 && w->nbr < 65 && i < w->nbr && i < 64) {
+        int opc = w->opener_pc[i];
+        acc = acc == 0 && opc == pc ? w->end_pc[i] : acc;
+        i = i + 1;
+    }
+    return acc;
+}
+
 unsigned int invoke(struct wst *st, struct wmod *m, unsigned int a, unsigned int b) {
     st->loc[0] = a;
     st->loc[1] = b;
@@ -292,18 +303,17 @@ unsigned int invoke(struct wst *st, struct wmod *m, unsigned int a, unsigned int
     return st->op[0];
 }
 
-unsigned int invoke_v2(struct wst *st, struct wmod *m, unsigned int a, unsigned int b) {
+unsigned int invoke_v2(struct wst *st, struct wmod *m, unsigned int a, unsigned int b, struct wcfg *w) {
     st->loc[0] = a;
     st->loc[1] = b;
+    extract_cfg(w, m);
     int pc_raw = m->body_off;
-    int len_raw = m->body_len;
     int pc = pc_raw >= 0 && pc_raw <= 60000 ? pc_raw : 0;
-    int len_safe = len_raw >= 0 && len_raw <= 60000 ? len_raw : 0;
-    int end_raw = pc + len_safe;
-    int end_pc = end_raw <= 60000 ? end_raw : 60000;
     int sp = 0;
+    int nl = 0;
     int halted = 0;
-    while (halted == 0 && pc < end_pc && pc < 59998) {
+    int fuel = 100000;
+    while (halted == 0 && fuel > 0 && pc < 59998) {
         int b = (int) wasm_buf[pc];
         if (b == 32) {
             int x = (int) wasm_buf[pc + 1];
@@ -315,6 +325,7 @@ unsigned int invoke_v2(struct wst *st, struct wmod *m, unsigned int a, unsigned 
             sp = ok ? sp + 1 : sp;
             pc = pc + 2;
             halted = ok ? halted : 1;
+            fuel = fuel - 1;
         } else {
             if (b == 33) {
                 int x = (int) wasm_buf[pc + 1];
@@ -326,6 +337,7 @@ unsigned int invoke_v2(struct wst *st, struct wmod *m, unsigned int a, unsigned 
                 sp = ok ? sp - 1 : sp;
                 pc = pc + 2;
                 halted = ok ? halted : 1;
+                fuel = fuel - 1;
             } else {
                 if (b == 34) {
                     int x = (int) wasm_buf[pc + 1];
@@ -336,6 +348,7 @@ unsigned int invoke_v2(struct wst *st, struct wmod *m, unsigned int a, unsigned 
                     st->loc[x_safe] = v;
                     pc = pc + 2;
                     halted = ok ? halted : 1;
+                    fuel = fuel - 1;
                 } else {
                     if (b == 69) {
                         int ok = sp > 0;
@@ -346,6 +359,7 @@ unsigned int invoke_v2(struct wst *st, struct wmod *m, unsigned int a, unsigned 
                         st->op[idx] = new_v;
                         pc = pc + 1;
                         halted = ok ? halted : 1;
+                        fuel = fuel - 1;
                     } else {
                         if (b == 112) {
                             int ok = sp > 1;
@@ -361,8 +375,78 @@ unsigned int invoke_v2(struct wst *st, struct wmod *m, unsigned int a, unsigned 
                             sp = safe ? sp - 1 : sp;
                             pc = pc + 1;
                             halted = safe ? halted : 1;
+                            fuel = fuel - 1;
                         } else {
-                            halted = 1;
+                            if (b == 2) {
+                                int ok = nl < 16;
+                                int nl_safe = ok ? nl : 0;
+                                int end_pc_raw = wcfg_end_pc_at(pc, w);
+                                int end_pc = end_pc_raw >= 0 && end_pc_raw <= 60000 ? end_pc_raw : 0;
+                                st->lpc[nl_safe] = end_pc;
+                                st->lsp[nl_safe] = sp;
+                                st->lkind[nl_safe] = (unsigned char) 0;
+                                nl = ok ? nl + 1 : nl;
+                                pc = pc + 2;
+                                halted = ok ? halted : 1;
+                                fuel = fuel - 1;
+                            } else {
+                                if (b == 3) {
+                                    int ok = nl < 16;
+                                    int nl_safe = ok ? nl : 0;
+                                    int loop_pc = pc + 2;
+                                    st->lpc[nl_safe] = loop_pc;
+                                    st->lsp[nl_safe] = sp;
+                                    st->lkind[nl_safe] = (unsigned char) 1;
+                                    nl = ok ? nl + 1 : nl;
+                                    pc = loop_pc;
+                                    halted = ok ? halted : 1;
+                                    fuel = fuel - 1;
+                                } else {
+                                    if (b == 11) {
+                                        if (nl == 0) {
+                                            halted = 1;
+                                            fuel = fuel - 1;
+                                        } else {
+                                            nl = nl - 1;
+                                            pc = pc + 1;
+                                            fuel = fuel - 1;
+                                        }
+                                    } else {
+                                        int is_br = b == 12;
+                                        int is_brif = b == 13;
+                                        int is_brx = is_br || is_brif;
+                                        if (is_brx) {
+                                            int l_byte = (int) wasm_buf[pc + 1];
+                                            int pop_ok = is_br || sp > 0;
+                                            int sp_after_pop = is_brif ? sp > 0 ? sp - 1 : sp : sp;
+                                            int peek_idx = sp > 0 ? sp - 1 : 0;
+                                            unsigned int peek_v = st->op[peek_idx];
+                                            int cond_true = peek_v != 0U || peek_v != 0U;
+                                            int take = is_br || is_brif && cond_true;
+                                            int l_ok = l_byte < nl;
+                                            int target_idx = l_ok ? nl - 1 - l_byte : 0;
+                                            int tpc_raw = st->lpc[target_idx];
+                                            int tsp_raw = st->lsp[target_idx];
+                                            unsigned char tkind_uc = st->lkind[target_idx];
+                                            int tkind = (int) tkind_uc;
+                                            int tpc_ok = tpc_raw >= 0 && tpc_raw <= 60000;
+                                            int tsp_ok = tsp_raw >= 0 && tsp_raw <= 64;
+                                            int all_ok = pop_ok && l_ok && tpc_ok && tsp_ok;
+                                            int new_nl = all_ok && take ? tkind == 1 ? target_idx + 1 : target_idx : nl;
+                                            int new_sp = all_ok && take ? tsp_raw : sp_after_pop;
+                                            int new_pc = all_ok && take ? tpc_raw : pc + 2;
+                                            sp = new_sp;
+                                            nl = new_nl;
+                                            pc = new_pc;
+                                            halted = all_ok ? halted : 1;
+                                            fuel = fuel - 1;
+                                        } else {
+                                            halted = 1;
+                                            fuel = fuel - 1;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

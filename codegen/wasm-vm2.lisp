@@ -2266,6 +2266,788 @@
   :induct (|exec_straight_line| |st| |sp| |pc| |end_pc| |halted| |wasm_buf|)
   :enable (|exec_straight_line|))
 
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; |wcfg_end_pc_at| — linear scan over the precomputed wcfg.
+;;
+;; Returns end_pc[i] for the first i where opener_pc[i] == |pc|, else 0.
+;; Replaces the runtime |scan_end| byte-walker for block (0x02) entry in
+;; the block-structured dispatcher |exec_blocks|.
+;;
+;; Structured as a $loop accumulator + thin wrapper, matching the
+;; |scan$loop| / |scan_end| pattern that ATC accepts as a C while-loop.
+
+(defun |wcfg_end_pc_at$loop| (|pc| |i| |acc| |w|)
+  (declare (xargs
+    :guard (and (c::sintp |pc|)
+                (c::sintp |i|)
+                (c::sintp |acc|)
+                (c::star (struct-|wcfg|-p |w|))
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (<= 0 (c::integer-from-sint |i|))
+                (<= (c::integer-from-sint |i|) 64))
+    :guard-hints
+    (("Goal"
+      :in-theory
+      (enable c::declar c::assign c::condexpr
+              c::add-sint-sint c::add-sint-sint-okp
+              c::lt-sint-sint c::ge-sint-sint c::eq-sint-sint
+              c::boolean-from-sint c::sint-from-boolean
+              c::sint-integerp-alt-def
+              c::integer-from-cinteger-alt-def
+              |STRUCT-wcfg-opener_pc-INDEX-OKP|
+              |STRUCT-wcfg-end_pc-INDEX-OKP|)))
+    :measure (nfix (- 64 (c::integer-from-sint |i|)))
+    :hints (("Goal" :in-theory (enable c::lt-sint-sint
+                                       c::ge-sint-sint
+                                       c::eq-sint-sint
+                                       c::add-sint-sint
+                                       c::sint-integerp-alt-def
+                                       c::boolean-from-sint
+                                       c::sint-from-boolean
+                                       c::declar
+                                       c::assign
+                                       c::condexpr)))))
+  (if (mbt (and (<= 0 (c::integer-from-sint |i|))
+                (<= (c::integer-from-sint |i|) 64)))
+      (if (c::boolean-from-sint
+           (c::sint-from-boolean
+            (and (c::boolean-from-sint
+                  (c::ge-sint-sint
+                   (struct-|wcfg|-read-|nbr| |w|) (c::sint-dec-const 0)))
+                 (c::boolean-from-sint
+                  (c::lt-sint-sint
+                   (struct-|wcfg|-read-|nbr| |w|) (c::sint-dec-const 65)))
+                 (c::boolean-from-sint
+                  (c::lt-sint-sint |i| (struct-|wcfg|-read-|nbr| |w|)))
+                 (c::boolean-from-sint
+                  (c::lt-sint-sint |i| (c::sint-dec-const 64))))))
+          (let* ((|opc| (c::declar
+                         (struct-|wcfg|-read-|opener_pc|-element |i| |w|)))
+                 (|acc|
+                  (c::assign
+                   (c::condexpr
+                    (if (c::boolean-from-sint
+                         (c::sint-from-boolean
+                          (and (c::boolean-from-sint
+                                (c::eq-sint-sint
+                                 |acc| (c::sint-dec-const 0)))
+                               (c::boolean-from-sint
+                                (c::eq-sint-sint |opc| |pc|)))))
+                        (struct-|wcfg|-read-|end_pc|-element |i| |w|)
+                      |acc|))))
+                 (|i| (c::assign (c::add-sint-sint
+                                  |i| (c::sint-dec-const 1)))))
+            (|wcfg_end_pc_at$loop| |pc| |i| |acc| |w|))
+        (mv |i| |acc|))
+    (mv |i| |acc|)))
+
+(defrulel sintp-of-mv-nth-1-wcfg_end_pc_at$loop
+  (implies (and (c::sintp |pc|)
+                (c::sintp |i|)
+                (c::sintp |acc|)
+                (c::star (struct-|wcfg|-p |w|))
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (<= 0 (c::integer-from-sint |i|))
+                (<= (c::integer-from-sint |i|) 64))
+           (c::sintp (mv-nth 1 (|wcfg_end_pc_at$loop| |pc| |i| |acc| |w|))))
+  :induct (|wcfg_end_pc_at$loop| |pc| |i| |acc| |w|)
+  :enable (|wcfg_end_pc_at$loop|
+           c::lt-sint-sint
+           c::ge-sint-sint
+           c::eq-sint-sint
+           c::add-sint-sint
+           c::declar
+           c::assign
+           c::condexpr))
+
+(defun |wcfg_end_pc_at| (|pc| |w|)
+  (declare (xargs
+    :guard (and (c::sintp |pc|)
+                (c::star (struct-|wcfg|-p |w|))
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000))
+    :guard-hints
+    (("Goal" :in-theory (enable c::declar c::sint-integerp-alt-def)))))
+  (let* ((|i|   (c::declar (c::sint-dec-const 0)))
+         (|acc| (c::declar (c::sint-dec-const 0))))
+    (mv-let (|i| |acc|)
+        (|wcfg_end_pc_at$loop| |pc| |i| |acc| |w|)
+      (declare (ignore |i|))
+      |acc|)))
+
+(defrulel sintp-of-wcfg_end_pc_at
+  (implies (and (c::sintp |pc|)
+                (c::star (struct-|wcfg|-p |w|))
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000))
+           (c::sintp (|wcfg_end_pc_at| |pc| |w|)))
+  :enable (|wcfg_end_pc_at| c::declar))
+
+(defun |exec_blocks| (|st| |sp| |nl| |pc| |halted| |fuel| |w| |wasm_buf|)
+  (declare (xargs
+    :guard (and (c::star (struct-|wst|-p |st|))
+                (c::sintp |sp|)
+                (<= 0 (c::integer-from-sint |sp|))
+                (<= (c::integer-from-sint |sp|) 64)
+                (c::sintp |nl|)
+                (<= 0 (c::integer-from-sint |nl|))
+                (<= (c::integer-from-sint |nl|) 16)
+                (c::sintp |pc|)
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (c::sintp |halted|)
+                (<= 0 (c::integer-from-sint |halted|))
+                (<= (c::integer-from-sint |halted|) 1)
+                (c::sintp |fuel|)
+                (<= 0 (c::integer-from-sint |fuel|))
+                (<= (c::integer-from-sint |fuel|) 100000)
+                (c::star (struct-|wcfg|-p |w|))
+                (object-|wasm_buf|-p |wasm_buf|))
+    :guard-hints
+    (("Goal"
+      :in-theory
+      (enable object-|wasm_buf|-p
+              c::uchar-array-index-okp
+              c::integer-from-cinteger-alt-def
+              c::sint-from-uchar-okp-when-uchar-max-<=-sint-max
+              c::uchar-max-vs-sint-max
+              c::uint-from-sint
+              c::uchar-from-sint
+              c::add-sint-sint
+              c::add-sint-sint-okp
+              c::sub-sint-sint
+              c::sub-sint-sint-okp
+              c::rem-uint-uint
+              c::rem-uint-uint-okp
+              c::sint-integerp-alt-def
+              c::integer-from-sint-of-sint-from-uchar
+              c::integer-from-uchar-upper-bound
+              c::ne-sint-sint
+              c::eq-sint-sint
+              c::gt-sint-sint
+              c::lt-sint-sint
+              c::le-sint-sint
+              c::ge-sint-sint
+              c::eq-uint-uint
+              c::ne-uint-uint
+              c::declar
+              c::assign
+              c::condexpr
+              |STRUCT-wst-op-INDEX-OKP|
+              |STRUCT-wst-loc-INDEX-OKP|
+              |STRUCT-wst-lpc-INDEX-OKP|
+              |STRUCT-wst-lsp-INDEX-OKP|
+              |STRUCT-wst-lkind-INDEX-OKP|)))
+    :measure (nfix (c::integer-from-sint |fuel|))
+    :hints (("Goal"
+             :in-theory
+             (enable c::gt-sint-sint
+                     c::sub-sint-sint
+                     c::sint-integerp-alt-def
+                     c::assign
+                     c::condexpr)))))
+  (if (mbt (and (<= 0 (c::integer-from-sint |sp|))
+                (<= (c::integer-from-sint |sp|) 64)
+                (<= 0 (c::integer-from-sint |nl|))
+                (<= (c::integer-from-sint |nl|) 16)
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (<= 0 (c::integer-from-sint |halted|))
+                (<= (c::integer-from-sint |halted|) 1)
+                (<= 0 (c::integer-from-sint |fuel|))
+                (<= (c::integer-from-sint |fuel|) 100000)))
+      (if (c::boolean-from-sint
+           (c::sint-from-boolean
+            (and (c::boolean-from-sint
+                  (c::eq-sint-sint |halted| (c::sint-dec-const 0)))
+                 (c::boolean-from-sint
+                  (c::gt-sint-sint |fuel| (c::sint-dec-const 0)))
+                 (c::boolean-from-sint
+                  (c::lt-sint-sint |pc| (c::sint-dec-const 59998))))))
+          (let* ((|b| (c::declar (byte-at |pc|))))
+            ;; ===== 0x20 local.get =====
+            (if (c::boolean-from-sint
+                 (c::eq-sint-sint |b| (c::sint-dec-const #x20)))
+                (let* ((|x| (c::declar
+                             (byte-at (c::add-sint-sint
+                                       |pc| (c::sint-dec-const 1)))))
+                       (|ok| (c::declar
+                              (c::sint-from-boolean
+                               (and (c::boolean-from-sint
+                                     (c::lt-sint-sint
+                                      |sp| (c::sint-dec-const 64)))
+                                    (c::boolean-from-sint
+                                     (c::lt-sint-sint
+                                      |x| (c::sint-dec-const 16)))))))
+                       (|x_safe| (c::declar
+                                  (c::condexpr
+                                   (if (c::boolean-from-sint |ok|)
+                                       |x|
+                                     (c::sint-dec-const 0)))))
+                       (|sp_safe| (c::declar
+                                   (c::condexpr
+                                    (if (c::boolean-from-sint |ok|)
+                                        |sp|
+                                      (c::sint-dec-const 0)))))
+                       (|v| (c::declar
+                             (struct-|wst|-read-|loc|-element |x_safe| |st|)))
+                       (|st| (struct-|wst|-write-|op|-element
+                              |sp_safe| |v| |st|))
+                       (|sp| (c::assign
+                              (c::condexpr
+                               (if (c::boolean-from-sint |ok|)
+                                   (c::add-sint-sint
+                                    |sp| (c::sint-dec-const 1))
+                                 |sp|))))
+                       (|pc| (c::assign
+                              (c::add-sint-sint |pc| (c::sint-dec-const 2))))
+                       (|halted| (c::assign
+                                  (c::condexpr
+                                   (if (c::boolean-from-sint |ok|)
+                                       |halted|
+                                     (c::sint-dec-const 1)))))
+                       (|fuel| (c::assign
+                                (c::sub-sint-sint
+                                 |fuel| (c::sint-dec-const 1)))))
+                  (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel|
+                               |w| |wasm_buf|))
+              ;; ===== 0x21 local.set =====
+              (if (c::boolean-from-sint
+                   (c::eq-sint-sint |b| (c::sint-dec-const #x21)))
+                  (let* ((|x| (c::declar
+                               (byte-at (c::add-sint-sint
+                                         |pc| (c::sint-dec-const 1)))))
+                         (|ok| (c::declar
+                                (c::sint-from-boolean
+                                 (and (c::boolean-from-sint
+                                       (c::gt-sint-sint
+                                        |sp| (c::sint-dec-const 0)))
+                                      (c::boolean-from-sint
+                                       (c::lt-sint-sint
+                                        |x| (c::sint-dec-const 16)))))))
+                         (|x_safe| (c::declar
+                                    (c::condexpr
+                                     (if (c::boolean-from-sint |ok|)
+                                         |x|
+                                       (c::sint-dec-const 0)))))
+                         (|idx| (c::declar
+                                 (c::condexpr
+                                  (if (c::boolean-from-sint |ok|)
+                                      (c::sub-sint-sint
+                                       |sp| (c::sint-dec-const 1))
+                                    (c::sint-dec-const 0)))))
+                         (|v| (c::declar
+                               (struct-|wst|-read-|op|-element |idx| |st|)))
+                         (|st| (struct-|wst|-write-|loc|-element
+                                |x_safe| |v| |st|))
+                         (|sp| (c::assign
+                                (c::condexpr
+                                 (if (c::boolean-from-sint |ok|)
+                                     (c::sub-sint-sint
+                                      |sp| (c::sint-dec-const 1))
+                                   |sp|))))
+                         (|pc| (c::assign
+                                (c::add-sint-sint
+                                 |pc| (c::sint-dec-const 2))))
+                         (|halted| (c::assign
+                                    (c::condexpr
+                                     (if (c::boolean-from-sint |ok|)
+                                         |halted|
+                                       (c::sint-dec-const 1)))))
+                         (|fuel| (c::assign
+                                  (c::sub-sint-sint
+                                   |fuel| (c::sint-dec-const 1)))))
+                    (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel|
+                                 |w| |wasm_buf|))
+                ;; ===== 0x22 local.tee =====
+                (if (c::boolean-from-sint
+                     (c::eq-sint-sint |b| (c::sint-dec-const #x22)))
+                    (let* ((|x| (c::declar
+                                 (byte-at (c::add-sint-sint
+                                           |pc| (c::sint-dec-const 1)))))
+                           (|ok| (c::declar
+                                  (c::sint-from-boolean
+                                   (and (c::boolean-from-sint
+                                         (c::gt-sint-sint
+                                          |sp| (c::sint-dec-const 0)))
+                                        (c::boolean-from-sint
+                                         (c::lt-sint-sint
+                                          |x| (c::sint-dec-const 16)))))))
+                           (|x_safe| (c::declar
+                                      (c::condexpr
+                                       (if (c::boolean-from-sint |ok|)
+                                           |x|
+                                         (c::sint-dec-const 0)))))
+                           (|idx| (c::declar
+                                   (c::condexpr
+                                    (if (c::boolean-from-sint |ok|)
+                                        (c::sub-sint-sint
+                                         |sp| (c::sint-dec-const 1))
+                                      (c::sint-dec-const 0)))))
+                           (|v| (c::declar
+                                 (struct-|wst|-read-|op|-element |idx| |st|)))
+                           (|st| (struct-|wst|-write-|loc|-element
+                                  |x_safe| |v| |st|))
+                           (|pc| (c::assign
+                                  (c::add-sint-sint
+                                   |pc| (c::sint-dec-const 2))))
+                           (|halted| (c::assign
+                                      (c::condexpr
+                                       (if (c::boolean-from-sint |ok|)
+                                           |halted|
+                                         (c::sint-dec-const 1)))))
+                           (|fuel| (c::assign
+                                    (c::sub-sint-sint
+                                     |fuel| (c::sint-dec-const 1)))))
+                      (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel|
+                                   |w| |wasm_buf|))
+                  ;; ===== 0x45 i32.eqz =====
+                  (if (c::boolean-from-sint
+                       (c::eq-sint-sint |b| (c::sint-dec-const #x45)))
+                      (let* ((|ok| (c::declar
+                                    (c::gt-sint-sint
+                                     |sp| (c::sint-dec-const 0))))
+                             (|idx| (c::declar
+                                     (c::condexpr
+                                      (if (c::boolean-from-sint |ok|)
+                                          (c::sub-sint-sint
+                                           |sp| (c::sint-dec-const 1))
+                                        (c::sint-dec-const 0)))))
+                             (|v| (c::declar
+                                   (struct-|wst|-read-|op|-element
+                                    |idx| |st|)))
+                             (|is0| (c::declar
+                                     (c::sint-from-boolean
+                                      (or (c::boolean-from-sint
+                                           (c::eq-uint-uint
+                                            |v| (c::uint-dec-const 0)))
+                                          (c::boolean-from-sint
+                                           (c::eq-uint-uint
+                                            |v| (c::uint-dec-const 0)))))))
+                             (|new_v| (c::declar
+                                       (c::uint-from-sint |is0|)))
+                             (|st| (struct-|wst|-write-|op|-element
+                                    |idx| |new_v| |st|))
+                             (|pc| (c::assign
+                                    (c::add-sint-sint
+                                     |pc| (c::sint-dec-const 1))))
+                             (|halted| (c::assign
+                                        (c::condexpr
+                                         (if (c::boolean-from-sint |ok|)
+                                             |halted|
+                                           (c::sint-dec-const 1)))))
+                             (|fuel| (c::assign
+                                      (c::sub-sint-sint
+                                       |fuel| (c::sint-dec-const 1)))))
+                        (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel|
+                                     |w| |wasm_buf|))
+                    ;; ===== 0x70 i32.rem_u =====
+                    (if (c::boolean-from-sint
+                         (c::eq-sint-sint |b| (c::sint-dec-const #x70)))
+                        (let* ((|ok| (c::declar
+                                      (c::gt-sint-sint
+                                       |sp| (c::sint-dec-const 1))))
+                               (|bi| (c::declar
+                                      (c::condexpr
+                                       (if (c::boolean-from-sint |ok|)
+                                           (c::sub-sint-sint
+                                            |sp| (c::sint-dec-const 1))
+                                         (c::sint-dec-const 0)))))
+                               (|ai| (c::declar
+                                      (c::condexpr
+                                       (if (c::boolean-from-sint |ok|)
+                                           (c::sub-sint-sint
+                                            |sp| (c::sint-dec-const 2))
+                                         (c::sint-dec-const 0)))))
+                               (|bv| (c::declar
+                                      (struct-|wst|-read-|op|-element
+                                       |bi| |st|)))
+                               (|av| (c::declar
+                                      (struct-|wst|-read-|op|-element
+                                       |ai| |st|)))
+                               (|nz| (c::declar
+                                      (c::sint-from-boolean
+                                       (or (c::boolean-from-sint
+                                            (c::ne-uint-uint
+                                             |bv| (c::uint-dec-const 0)))
+                                           (c::boolean-from-sint
+                                            (c::ne-uint-uint
+                                             |bv| (c::uint-dec-const 0)))))))
+                               (|safe| (c::declar
+                                        (c::sint-from-boolean
+                                         (and (c::boolean-from-sint |ok|)
+                                              (c::boolean-from-sint |nz|)))))
+                               (|bv_safe| (c::declar
+                                           (c::condexpr
+                                            (if (c::boolean-from-sint |safe|)
+                                                |bv|
+                                              (c::uint-dec-const 1)))))
+                               (|rv| (c::declar
+                                      (c::rem-uint-uint |av| |bv_safe|)))
+                               (|st| (struct-|wst|-write-|op|-element
+                                      |ai| |rv| |st|))
+                               (|sp| (c::assign
+                                      (c::condexpr
+                                       (if (c::boolean-from-sint |safe|)
+                                           (c::sub-sint-sint
+                                            |sp| (c::sint-dec-const 1))
+                                         |sp|))))
+                               (|pc| (c::assign
+                                      (c::add-sint-sint
+                                       |pc| (c::sint-dec-const 1))))
+                               (|halted| (c::assign
+                                          (c::condexpr
+                                           (if (c::boolean-from-sint |safe|)
+                                               |halted|
+                                             (c::sint-dec-const 1)))))
+                               (|fuel| (c::assign
+                                        (c::sub-sint-sint
+                                         |fuel| (c::sint-dec-const 1)))))
+                          (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel|
+                                       |w| |wasm_buf|))
+                      ;; ===== 0x02 block =====
+                      (if (c::boolean-from-sint
+                           (c::eq-sint-sint |b| (c::sint-dec-const #x02)))
+                          (let* ((|ok| (c::declar
+                                        (c::lt-sint-sint
+                                         |nl| (c::sint-dec-const 16))))
+                                 (|nl_safe| (c::declar
+                                             (c::condexpr
+                                              (if (c::boolean-from-sint |ok|)
+                                                  |nl|
+                                                (c::sint-dec-const 0)))))
+                                 (|end_pc_raw| (c::declar
+                                                (|wcfg_end_pc_at|
+                                                 |pc|
+                                                 |w|)))
+                                 (|end_pc| (c::declar
+                                            (c::condexpr
+                                             (if (c::boolean-from-sint
+                                                  (c::sint-from-boolean
+                                                   (and (c::boolean-from-sint
+                                                         (c::ge-sint-sint
+                                                          |end_pc_raw|
+                                                          (c::sint-dec-const 0)))
+                                                        (c::boolean-from-sint
+                                                         (c::le-sint-sint
+                                                          |end_pc_raw|
+                                                          (c::sint-dec-const 60000))))))
+                                                 |end_pc_raw|
+                                               (c::sint-dec-const 0)))))
+                                 (|st| (struct-|wst|-write-|lpc|-element
+                                        |nl_safe| |end_pc| |st|))
+                                 (|st| (struct-|wst|-write-|lsp|-element
+                                        |nl_safe| |sp| |st|))
+                                 (|st| (struct-|wst|-write-|lkind|-element
+                                        |nl_safe|
+                                        (c::uchar-from-sint
+                                         (c::sint-dec-const 0))
+                                        |st|))
+                                 (|nl| (c::assign
+                                        (c::condexpr
+                                         (if (c::boolean-from-sint |ok|)
+                                             (c::add-sint-sint
+                                              |nl| (c::sint-dec-const 1))
+                                           |nl|))))
+                                 (|pc| (c::assign
+                                        (c::add-sint-sint
+                                         |pc| (c::sint-dec-const 2))))
+                                 (|halted| (c::assign
+                                            (c::condexpr
+                                             (if (c::boolean-from-sint |ok|)
+                                                 |halted|
+                                               (c::sint-dec-const 1)))))
+                                 (|fuel| (c::assign
+                                          (c::sub-sint-sint
+                                           |fuel| (c::sint-dec-const 1)))))
+                            (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel|
+                                         |w| |wasm_buf|))
+                        ;; ===== 0x03 loop =====
+                        (if (c::boolean-from-sint
+                             (c::eq-sint-sint |b| (c::sint-dec-const #x03)))
+                            (let* ((|ok| (c::declar
+                                          (c::lt-sint-sint
+                                           |nl| (c::sint-dec-const 16))))
+                                   (|nl_safe| (c::declar
+                                               (c::condexpr
+                                                (if (c::boolean-from-sint |ok|)
+                                                    |nl|
+                                                  (c::sint-dec-const 0)))))
+                                   (|loop_pc| (c::declar
+                                               (c::add-sint-sint
+                                                |pc| (c::sint-dec-const 2))))
+                                   (|st| (struct-|wst|-write-|lpc|-element
+                                          |nl_safe| |loop_pc| |st|))
+                                   (|st| (struct-|wst|-write-|lsp|-element
+                                          |nl_safe| |sp| |st|))
+                                   (|st| (struct-|wst|-write-|lkind|-element
+                                          |nl_safe|
+                                          (c::uchar-from-sint
+                                           (c::sint-dec-const 1))
+                                          |st|))
+                                   (|nl| (c::assign
+                                          (c::condexpr
+                                           (if (c::boolean-from-sint |ok|)
+                                               (c::add-sint-sint
+                                                |nl| (c::sint-dec-const 1))
+                                             |nl|))))
+                                   (|pc| (c::assign |loop_pc|))
+                                   (|halted| (c::assign
+                                              (c::condexpr
+                                               (if (c::boolean-from-sint |ok|)
+                                                   |halted|
+                                                 (c::sint-dec-const 1)))))
+                                   (|fuel| (c::assign
+                                            (c::sub-sint-sint
+                                             |fuel| (c::sint-dec-const 1)))))
+                              (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel|
+                                           |w| |wasm_buf|))
+                          ;; ===== 0x0b end =====
+                          (if (c::boolean-from-sint
+                               (c::eq-sint-sint |b| (c::sint-dec-const #x0b)))
+                              (if (c::boolean-from-sint
+                                   (c::eq-sint-sint
+                                    |nl| (c::sint-dec-const 0)))
+                                  ;; top-level end: halt.
+                                  (let* ((|halted|
+                                          (c::assign (c::sint-dec-const 1)))
+                                         (|fuel|
+                                          (c::assign
+                                           (c::sub-sint-sint
+                                            |fuel| (c::sint-dec-const 1)))))
+                                    (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel| |w| |wasm_buf|))
+                                ;; pop label, advance pc.
+                                (let* ((|nl| (c::assign
+                                              (c::sub-sint-sint
+                                               |nl| (c::sint-dec-const 1))))
+                                       (|pc| (c::assign
+                                              (c::add-sint-sint
+                                               |pc| (c::sint-dec-const 1))))
+                                       (|fuel| (c::assign
+                                                (c::sub-sint-sint
+                                                 |fuel| (c::sint-dec-const 1)))))
+                                  (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel| |w| |wasm_buf|)))
+                            ;; ===== 0x0c br / 0x0d br_if =====
+                            (let* ((|is_br| (c::declar
+                                             (c::eq-sint-sint
+                                              |b| (c::sint-dec-const #x0c))))
+                                   (|is_brif| (c::declar
+                                               (c::eq-sint-sint
+                                                |b| (c::sint-dec-const #x0d))))
+                                   (|is_brx| (c::declar
+                                              (c::sint-from-boolean
+                                               (or (c::boolean-from-sint
+                                                    |is_br|)
+                                                   (c::boolean-from-sint
+                                                    |is_brif|))))))
+                              (if (c::boolean-from-sint |is_brx|)
+                                  ;; br / br_if: optionally pop, decide,
+                                  ;; compute target.
+                                  (let* ((|l_byte| (c::declar
+                                                    (byte-at
+                                                     (c::add-sint-sint
+                                                      |pc|
+                                                      (c::sint-dec-const 1)))))
+                                         ;; For br_if, pop value and test.
+                                         (|pop_ok| (c::declar
+                                                    (c::sint-from-boolean
+                                                     (or (c::boolean-from-sint
+                                                          |is_br|)
+                                                         (c::boolean-from-sint
+                                                          (c::gt-sint-sint
+                                                           |sp|
+                                                           (c::sint-dec-const 0)))))))
+                                         (|sp_after_pop|
+                                          (c::declar
+                                           (c::condexpr
+                                            (if (c::boolean-from-sint |is_brif|)
+                                                (c::condexpr
+                                                 (if (c::boolean-from-sint
+                                                      (c::gt-sint-sint
+                                                       |sp|
+                                                       (c::sint-dec-const 0)))
+                                                     (c::sub-sint-sint
+                                                      |sp|
+                                                      (c::sint-dec-const 1))
+                                                   |sp|))
+                                              |sp|))))
+                                         (|peek_idx|
+                                          (c::declar
+                                           (c::condexpr
+                                            (if (c::boolean-from-sint
+                                                 (c::gt-sint-sint
+                                                  |sp|
+                                                  (c::sint-dec-const 0)))
+                                                (c::sub-sint-sint
+                                                 |sp|
+                                                 (c::sint-dec-const 1))
+                                              (c::sint-dec-const 0)))))
+                                         (|peek_v|
+                                          (c::declar
+                                           (struct-|wst|-read-|op|-element
+                                            |peek_idx| |st|)))
+                                         (|cond_true|
+                                          (c::declar
+                                           (c::sint-from-boolean
+                                            (or (c::boolean-from-sint
+                                                 (c::ne-uint-uint
+                                                  |peek_v| (c::uint-dec-const 0)))
+                                                (c::boolean-from-sint
+                                                 (c::ne-uint-uint
+                                                  |peek_v| (c::uint-dec-const 0)))))))
+                                         (|take| (c::declar
+                                                  (c::sint-from-boolean
+                                                   (or (c::boolean-from-sint
+                                                        |is_br|)
+                                                       (c::boolean-from-sint
+                                                        (c::sint-from-boolean
+                                                         (and (c::boolean-from-sint
+                                                               |is_brif|)
+                                                              (c::boolean-from-sint
+                                                               |cond_true|))))))))
+                                         ;; Compute target when taking.
+                                         (|l_ok|
+                                          (c::declar
+                                           (c::lt-sint-sint |l_byte| |nl|)))
+                                         (|target_idx|
+                                          (c::declar
+                                           (c::condexpr
+                                            (if (c::boolean-from-sint |l_ok|)
+                                                (c::sub-sint-sint
+                                                 (c::sub-sint-sint
+                                                  |nl|
+                                                  (c::sint-dec-const 1))
+                                                 |l_byte|)
+                                              (c::sint-dec-const 0)))))
+                                         (|tpc_raw|
+                                          (c::declar
+                                           (struct-|wst|-read-|lpc|-element
+                                            |target_idx| |st|)))
+                                         (|tsp_raw|
+                                          (c::declar
+                                           (struct-|wst|-read-|lsp|-element
+                                            |target_idx| |st|)))
+                                         (|tkind_uc|
+                                          (c::declar
+                                           (struct-|wst|-read-|lkind|-element
+                                            |target_idx| |st|)))
+                                         (|tkind|
+                                          (c::declar
+                                           (c::sint-from-uchar |tkind_uc|)))
+                                         (|tpc_ok|
+                                          (c::declar
+                                           (c::sint-from-boolean
+                                            (and (c::boolean-from-sint
+                                                  (c::ge-sint-sint
+                                                   |tpc_raw|
+                                                   (c::sint-dec-const 0)))
+                                                 (c::boolean-from-sint
+                                                  (c::le-sint-sint
+                                                   |tpc_raw|
+                                                   (c::sint-dec-const 60000)))))))
+                                         (|tsp_ok|
+                                          (c::declar
+                                           (c::sint-from-boolean
+                                            (and (c::boolean-from-sint
+                                                  (c::ge-sint-sint
+                                                   |tsp_raw|
+                                                   (c::sint-dec-const 0)))
+                                                 (c::boolean-from-sint
+                                                  (c::le-sint-sint
+                                                   |tsp_raw|
+                                                   (c::sint-dec-const 64)))))))
+                                         (|all_ok|
+                                          (c::declar
+                                           (c::sint-from-boolean
+                                            (and (c::boolean-from-sint
+                                                  |pop_ok|)
+                                                 (c::boolean-from-sint
+                                                  |l_ok|)
+                                                 (c::boolean-from-sint
+                                                  |tpc_ok|)
+                                                 (c::boolean-from-sint
+                                                  |tsp_ok|)))))
+                                         ;; Compute new state.
+                                         (|new_nl|
+                                          (c::declar
+                                           (c::condexpr
+                                            (if (c::boolean-from-sint
+                                                 (c::sint-from-boolean
+                                                  (and (c::boolean-from-sint
+                                                        |all_ok|)
+                                                       (c::boolean-from-sint
+                                                        |take|))))
+                                                (c::condexpr
+                                                 (if (c::boolean-from-sint
+                                                      (c::eq-sint-sint
+                                                       |tkind|
+                                                       (c::sint-dec-const 1)))
+                                                     (c::add-sint-sint
+                                                      |target_idx|
+                                                      (c::sint-dec-const 1))
+                                                   |target_idx|))
+                                              |nl|))))
+                                         (|new_sp|
+                                          (c::declar
+                                           (c::condexpr
+                                            (if (c::boolean-from-sint
+                                                 (c::sint-from-boolean
+                                                  (and (c::boolean-from-sint
+                                                        |all_ok|)
+                                                       (c::boolean-from-sint
+                                                        |take|))))
+                                                |tsp_raw|
+                                              |sp_after_pop|))))
+                                         (|new_pc|
+                                          (c::declar
+                                           (c::condexpr
+                                            (if (c::boolean-from-sint
+                                                 (c::sint-from-boolean
+                                                  (and (c::boolean-from-sint
+                                                        |all_ok|)
+                                                       (c::boolean-from-sint
+                                                        |take|))))
+                                                |tpc_raw|
+                                              (c::add-sint-sint
+                                               |pc|
+                                               (c::sint-dec-const 2))))))
+                                         (|sp| (c::assign |new_sp|))
+                                         (|nl| (c::assign |new_nl|))
+                                         (|pc| (c::assign |new_pc|))
+                                         (|halted|
+                                          (c::assign
+                                           (c::condexpr
+                                            (if (c::boolean-from-sint
+                                                 |all_ok|)
+                                                |halted|
+                                              (c::sint-dec-const 1)))))
+                                         (|fuel| (c::assign
+                                                  (c::sub-sint-sint
+                                                   |fuel|
+                                                   (c::sint-dec-const 1)))))
+                                    (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel| |w| |wasm_buf|))
+                                ;; unknown opcode: halt.
+                                (let* ((|halted|
+                                        (c::assign (c::sint-dec-const 1)))
+                                       (|fuel|
+                                        (c::assign
+                                         (c::sub-sint-sint
+                                          |fuel| (c::sint-dec-const 1)))))
+                                  (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel| |w| |wasm_buf|)))))))))))))
+        (mv |st| |sp| |nl| |pc| |halted| |fuel|))
+    (mv |st| |sp| |nl| |pc| |halted| |fuel|)))
+
+(defrulel struct-wst-p-of-mv-nth-0-exec_blocks
+  (implies (struct-|wst|-p |st|)
+           (struct-|wst|-p
+            (mv-nth 0 (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel| |w| |wasm_buf|))))
+  :induct (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel| |w| |wasm_buf|)
+  :enable (|exec_blocks|))
+
+
 (defun |invoke| (|st| |m| |a| |b| |wasm_buf|)
   (declare (xargs :guard (and (c::star (struct-|wst|-p |st|))
                               (c::star (struct-|wmod|-p |m|))
@@ -2308,18 +3090,16 @@
       (mv (struct-|wst|-read-|op|-element (c::sint-dec-const 0) |st|)
           |st|))))
 
-;; Phase 2 entry point.  For now |invoke_v2| just runs |exec_straight_line|
-;; once over the entire body (no block dispatch — that's Phase 2b).  This
-;; satisfies ATC's "called by another target" requirement and gives us a
-;; second C entry point we can compare against |invoke| once |exec_blocks|
-;; is in place.  On the 4 oracle fixtures it will halt early at the first
-;; control-flow byte, so Phase 2a output is intentionally unequal to Phase 1
-;; output — that's fine.
-(defun |invoke_v2| (|st| |m| |a| |b| |wasm_buf|)
+;; Phase 2b entry point.  Calls |extract_cfg| once over the function body
+;; to populate |w|, then runs |exec_blocks| (the block-structured outer
+;; dispatcher) which uses |w| to look up matching `end' positions instead
+;; of doing the runtime byte-scan that |exec$loop| does via |scan_end|.
+(defun |invoke_v2| (|st| |m| |a| |b| |w| |wasm_buf|)
   (declare (xargs :guard (and (c::star (struct-|wst|-p |st|))
                               (c::star (struct-|wmod|-p |m|))
                               (c::uintp |a|)
                               (c::uintp |b|)
+                              (c::star (struct-|wcfg|-p |w|))
                               (object-|wasm_buf|-p |wasm_buf|))
                   :guard-hints
                   (("Goal" :in-theory (enable object-|wasm_buf|-p
@@ -2336,8 +3116,8 @@
                 (c::sint-dec-const 0) |a| |st|))
          (|st| (struct-|wst|-write-|loc|-element
                 (c::sint-dec-const 1) |b| |st|))
+         (|w|  (|extract_cfg| |w| |m| |wasm_buf|))
          (|pc_raw| (c::declar (struct-|wmod|-read-|body_off| |m|)))
-         (|len_raw| (c::declar (struct-|wmod|-read-|body_len| |m|)))
          (|pc| (c::declar
                 (c::condexpr
                  (if (c::boolean-from-sint
@@ -2350,34 +3130,16 @@
                               |pc_raw| (c::sint-dec-const 60000))))))
                      |pc_raw|
                    (c::sint-dec-const 0)))))
-         (|len_safe| (c::declar
-                      (c::condexpr
-                       (if (c::boolean-from-sint
-                            (c::sint-from-boolean
-                             (and (c::boolean-from-sint
-                                   (c::ge-sint-sint
-                                    |len_raw| (c::sint-dec-const 0)))
-                                  (c::boolean-from-sint
-                                   (c::le-sint-sint
-                                    |len_raw| (c::sint-dec-const 60000))))))
-                           |len_raw|
-                         (c::sint-dec-const 0)))))
-         (|end_raw| (c::declar
-                     (c::add-sint-sint |pc| |len_safe|)))
-         (|end_pc| (c::declar
-                    (c::condexpr
-                     (if (c::boolean-from-sint
-                          (c::le-sint-sint
-                           |end_raw| (c::sint-dec-const 60000)))
-                         |end_raw|
-                       (c::sint-dec-const 60000)))))
          (|sp|     (c::declar (c::sint-dec-const 0)))
-         (|halted| (c::declar (c::sint-dec-const 0))))
-    (mv-let (|st| |sp| |pc| |halted|)
-        (|exec_straight_line| |st| |sp| |pc| |end_pc| |halted| |wasm_buf|)
-      (declare (ignore |sp| |pc| |halted|))
+         (|nl|     (c::declar (c::sint-dec-const 0)))
+         (|halted| (c::declar (c::sint-dec-const 0)))
+         (|fuel|   (c::declar (c::sint-dec-const 100000))))
+    (mv-let (|st| |sp| |nl| |pc| |halted| |fuel|)
+        (|exec_blocks| |st| |sp| |nl| |pc| |halted| |fuel| |w| |wasm_buf|)
+      (declare (ignore |sp| |nl| |pc| |halted| |fuel|))
       (mv (struct-|wst|-read-|op|-element (c::sint-dec-const 0) |st|)
-          |st|))))
+          |st|
+          |w|))))
 
 (c::atc |wasm_buf|
         |wmod|
@@ -2394,7 +3156,9 @@
         |extract_cfg$loop|
         |extract_cfg|
         |exec$loop|
-        |exec_straight_line|
+        |wcfg_end_pc_at$loop|
+        |wcfg_end_pc_at|
+        |exec_blocks|
         |invoke|
         |invoke_v2|
         :file-name "wasm-vm2"
