@@ -25,7 +25,8 @@ WAT_SOURCES := $(wildcard tests/oracle/*.wat)
 WASM_BINARIES := $(patsubst %.wat,%.wasm,$(WAT_SOURCES))
 
 .PHONY: all top proofs tests clean wasm wasm-vm1 oracle-verified-m1 \
-        codegen-demo codegen-run codegen-oracle codegen-vm2 codegen-dump-cfg
+        codegen-demo codegen-run codegen-oracle codegen-vm2 codegen-dump-cfg \
+        codegen-run-vm2
 
 # Single cert.pl invocation so its internal dependency tracker avoids races
 # on shared prerequisites like execution.cert.
@@ -143,6 +144,32 @@ codegen-run: codegen/run_demo $(WASM_BINARIES)
 
 codegen-oracle: codegen-run
 
+# ---- wasm-vm2 runner ------------------------------------------------------
+#
+# run_vm2 links against codegen/wasm-vm2.c and dispatches into invoke_v2
+# (block-structured, default) or invoke (flat, kept for reference) based on
+# a `--vm v1|v2` flag.
+
+codegen/run_vm2: codegen/wasm-vm2.c codegen/wasm-vm2.h codegen/run_vm2_main.c
+	$(CC) $(CFLAGS) -Icodegen codegen/wasm-vm2.c codegen/run_vm2_main.c -o $@
+
+codegen-run-vm2: codegen/run_vm2 $(WASM_BINARIES)
+	@set -e; \
+	for vm in v2 v1; do \
+	  echo "=== --vm $$vm ==="; \
+	  for f in $(CODEGEN_FIXTURES); do \
+	    wasm=$$(echo $$f | cut -d: -f1); \
+	    name=$$(echo $$f | cut -d: -f2); \
+	    a=$$(echo $$f | cut -d: -f3); \
+	    b=$$(echo $$f | cut -d: -f4); \
+	    exp=$$(echo $$f | cut -d: -f5); \
+	    got=$$(./codegen/run_vm2 --vm $$vm $$wasm $$name $$a $$b); \
+	    printf "%-9s %-16s a=%-7s b=%-4s got=%-8s exp=%-8s " \
+	           "$$name" "`basename $$wasm`" "$$a" "$$b" "$$got" "$$exp"; \
+	    if [ "$$got" = "$$exp" ]; then echo OK; else echo FAIL; fi; \
+	  done; \
+	done
+
 clean:
 	find . \( -name '*.cert' -o -name '*.cert.out' -o -name '*.port' \
 	       -o -name '*.lx64fsl' -o -name '*.fasl' -o -name '*.pcert0' \
@@ -154,6 +181,7 @@ clean:
 	      codegen/wasm-vm1.c codegen/wasm-vm1.h \
 	      codegen/wasm-vm2.c codegen/wasm-vm2.h \
 	      codegen/dump_cfg \
+	      codegen/run_vm2 \
 	      codegen/demo.c codegen/demo.h \
 	      codegen/loop-demo.c codegen/loop-demo.h \
 	      codegen/run_sanity
