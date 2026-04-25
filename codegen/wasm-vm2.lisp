@@ -1933,6 +1933,339 @@
   :induct (|exec$loop| |st| |sp| |nl| |pc| |halted| |fuel| |wasm_buf|)
   :enable (|exec$loop|))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Phase 2 — block-structured execution.
+;;
+;; |exec_straight_line| executes ONLY the 5 straight-line opcodes
+;; (0x20 local.get, 0x21 local.set, 0x22 local.tee, 0x45 i32.eqz,
+;; 0x70 i32.rem_u).  It runs from |pc| up to but not including |end_pc|,
+;; stopping early on any other byte (control-flow op, unknown opcode) or
+;; on halt.  The pre-extracted |wcfg| supplies |end_pc| from the enclosing
+;; block, so this function is fuel-free — its measure is just
+;; (nfix (end_pc - pc)) and every recursive step strictly advances pc.
+;;
+;; The outer |exec_blocks| dispatcher (Phase 2b) will call this once per
+;; block, then dispatch on the trailing control-flow byte.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun |exec_straight_line| (|st| |sp| |pc| |end_pc| |halted| |wasm_buf|)
+  (declare (xargs
+    :guard (and (c::star (struct-|wst|-p |st|))
+                (c::sintp |sp|)
+                (<= 0 (c::integer-from-sint |sp|))
+                (<= (c::integer-from-sint |sp|) 64)
+                (c::sintp |pc|)
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (c::sintp |end_pc|)
+                (<= 0 (c::integer-from-sint |end_pc|))
+                (<= (c::integer-from-sint |end_pc|) 60000)
+                (c::sintp |halted|)
+                (<= 0 (c::integer-from-sint |halted|))
+                (<= (c::integer-from-sint |halted|) 1)
+                (object-|wasm_buf|-p |wasm_buf|))
+    :guard-hints
+    (("Goal"
+      :in-theory
+      (enable object-|wasm_buf|-p
+              c::uchar-array-index-okp
+              c::integer-from-cinteger-alt-def
+              c::sint-from-uchar-okp-when-uchar-max-<=-sint-max
+              c::uchar-max-vs-sint-max
+              c::uint-from-sint
+              c::uchar-from-sint
+              c::add-sint-sint
+              c::add-sint-sint-okp
+              c::sub-sint-sint
+              c::sub-sint-sint-okp
+              c::rem-uint-uint
+              c::rem-uint-uint-okp
+              c::sint-integerp-alt-def
+              c::integer-from-sint-of-sint-from-uchar
+              c::integer-from-uchar-upper-bound
+              c::eq-sint-sint
+              c::gt-sint-sint
+              c::lt-sint-sint
+              c::eq-uint-uint
+              c::ne-uint-uint
+              c::declar
+              c::assign
+              c::condexpr
+              |STRUCT-wst-op-INDEX-OKP|
+              |STRUCT-wst-loc-INDEX-OKP|)))
+    :measure (nfix (+ (- (c::integer-from-sint |end_pc|)
+                         (c::integer-from-sint |pc|))
+                      (- 1 (c::integer-from-sint |halted|))))
+    :hints (("Goal"
+             :in-theory
+             (enable c::lt-sint-sint
+                     c::eq-sint-sint
+                     c::ne-sint-sint
+                     c::add-sint-sint
+                     c::sint-integerp-alt-def
+                     c::boolean-from-sint
+                     c::sint-from-boolean
+                     c::assign c::declar c::condexpr)))))
+  (if (mbt (and (<= 0 (c::integer-from-sint |sp|))
+                (<= (c::integer-from-sint |sp|) 64)
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (<= 0 (c::integer-from-sint |end_pc|))
+                (<= (c::integer-from-sint |end_pc|) 60000)
+                (<= 0 (c::integer-from-sint |halted|))
+                (<= (c::integer-from-sint |halted|) 1)))
+      (if (c::boolean-from-sint
+           (c::sint-from-boolean
+            (and (c::boolean-from-sint
+                  (c::eq-sint-sint |halted| (c::sint-dec-const 0)))
+                 (c::boolean-from-sint
+                  (c::lt-sint-sint |pc| |end_pc|))
+                 (c::boolean-from-sint
+                  (c::lt-sint-sint |pc| (c::sint-dec-const 59998))))))
+          (let* ((|b| (c::declar (byte-at |pc|))))
+            (if (c::boolean-from-sint
+                 (c::eq-sint-sint |b| (c::sint-dec-const #x20)))
+                (let* ((|x| (c::declar
+                             (byte-at (c::add-sint-sint
+                                       |pc| (c::sint-dec-const 1)))))
+                       (|ok| (c::declar
+                              (c::sint-from-boolean
+                               (and (c::boolean-from-sint
+                                     (c::lt-sint-sint
+                                      |sp| (c::sint-dec-const 64)))
+                                    (c::boolean-from-sint
+                                     (c::lt-sint-sint
+                                      |x| (c::sint-dec-const 16)))))))
+                       (|x_safe| (c::declar
+                                  (c::condexpr
+                                   (if (c::boolean-from-sint |ok|)
+                                       |x|
+                                     (c::sint-dec-const 0)))))
+                       (|sp_safe| (c::declar
+                                   (c::condexpr
+                                    (if (c::boolean-from-sint |ok|)
+                                        |sp|
+                                      (c::sint-dec-const 0)))))
+                       (|v| (c::declar
+                             (struct-|wst|-read-|loc|-element |x_safe| |st|)))
+                       (|st| (struct-|wst|-write-|op|-element
+                              |sp_safe| |v| |st|))
+                       (|sp| (c::assign
+                              (c::condexpr
+                               (if (c::boolean-from-sint |ok|)
+                                   (c::add-sint-sint
+                                    |sp| (c::sint-dec-const 1))
+                                 |sp|))))
+                       (|pc| (c::assign
+                              (c::add-sint-sint |pc| (c::sint-dec-const 2))))
+                       (|halted| (c::assign
+                                  (c::condexpr
+                                   (if (c::boolean-from-sint |ok|)
+                                       |halted|
+                                     (c::sint-dec-const 1))))))
+                  (|exec_straight_line| |st| |sp| |pc| |end_pc| |halted|
+                                        |wasm_buf|))
+
+              (if (c::boolean-from-sint
+                   (c::eq-sint-sint |b| (c::sint-dec-const #x21)))
+                  (let* ((|x| (c::declar
+                               (byte-at (c::add-sint-sint
+                                         |pc| (c::sint-dec-const 1)))))
+                         (|ok| (c::declar
+                                (c::sint-from-boolean
+                                 (and (c::boolean-from-sint
+                                       (c::gt-sint-sint
+                                        |sp| (c::sint-dec-const 0)))
+                                      (c::boolean-from-sint
+                                       (c::lt-sint-sint
+                                        |x| (c::sint-dec-const 16)))))))
+                         (|x_safe| (c::declar
+                                    (c::condexpr
+                                     (if (c::boolean-from-sint |ok|)
+                                         |x|
+                                       (c::sint-dec-const 0)))))
+                         (|idx| (c::declar
+                                 (c::condexpr
+                                  (if (c::boolean-from-sint |ok|)
+                                      (c::sub-sint-sint
+                                       |sp| (c::sint-dec-const 1))
+                                    (c::sint-dec-const 0)))))
+                         (|v| (c::declar
+                               (struct-|wst|-read-|op|-element |idx| |st|)))
+                         (|st| (struct-|wst|-write-|loc|-element
+                                |x_safe| |v| |st|))
+                         (|sp| (c::assign
+                                (c::condexpr
+                                 (if (c::boolean-from-sint |ok|)
+                                     (c::sub-sint-sint
+                                      |sp| (c::sint-dec-const 1))
+                                   |sp|))))
+                         (|pc| (c::assign
+                                (c::add-sint-sint
+                                 |pc| (c::sint-dec-const 2))))
+                         (|halted| (c::assign
+                                    (c::condexpr
+                                     (if (c::boolean-from-sint |ok|)
+                                         |halted|
+                                       (c::sint-dec-const 1))))))
+                    (|exec_straight_line| |st| |sp| |pc| |end_pc| |halted|
+                                        |wasm_buf|))
+
+                (if (c::boolean-from-sint
+                     (c::eq-sint-sint |b| (c::sint-dec-const #x22)))
+                    (let* ((|x| (c::declar
+                                 (byte-at (c::add-sint-sint
+                                           |pc| (c::sint-dec-const 1)))))
+                           (|ok| (c::declar
+                                  (c::sint-from-boolean
+                                   (and (c::boolean-from-sint
+                                         (c::gt-sint-sint
+                                          |sp| (c::sint-dec-const 0)))
+                                        (c::boolean-from-sint
+                                         (c::lt-sint-sint
+                                          |x| (c::sint-dec-const 16)))))))
+                           (|x_safe| (c::declar
+                                      (c::condexpr
+                                       (if (c::boolean-from-sint |ok|)
+                                           |x|
+                                         (c::sint-dec-const 0)))))
+                           (|idx| (c::declar
+                                   (c::condexpr
+                                    (if (c::boolean-from-sint |ok|)
+                                        (c::sub-sint-sint
+                                         |sp| (c::sint-dec-const 1))
+                                      (c::sint-dec-const 0)))))
+                           (|v| (c::declar
+                                 (struct-|wst|-read-|op|-element |idx| |st|)))
+                           (|st| (struct-|wst|-write-|loc|-element
+                                  |x_safe| |v| |st|))
+                           (|pc| (c::assign
+                                  (c::add-sint-sint
+                                   |pc| (c::sint-dec-const 2))))
+                           (|halted| (c::assign
+                                      (c::condexpr
+                                       (if (c::boolean-from-sint |ok|)
+                                           |halted|
+                                         (c::sint-dec-const 1))))))
+                      (|exec_straight_line| |st| |sp| |pc| |end_pc| |halted|
+                                        |wasm_buf|))
+
+                  (if (c::boolean-from-sint
+                       (c::eq-sint-sint |b| (c::sint-dec-const #x45)))
+                      (let* ((|ok| (c::declar
+                                    (c::gt-sint-sint
+                                     |sp| (c::sint-dec-const 0))))
+                             (|idx| (c::declar
+                                     (c::condexpr
+                                      (if (c::boolean-from-sint |ok|)
+                                          (c::sub-sint-sint
+                                           |sp| (c::sint-dec-const 1))
+                                        (c::sint-dec-const 0)))))
+                             (|v| (c::declar
+                                   (struct-|wst|-read-|op|-element
+                                    |idx| |st|)))
+                             (|is0| (c::declar
+                                     (c::sint-from-boolean
+                                      (or (c::boolean-from-sint
+                                           (c::eq-uint-uint
+                                            |v| (c::uint-dec-const 0)))
+                                          (c::boolean-from-sint
+                                           (c::eq-uint-uint
+                                            |v| (c::uint-dec-const 0)))))))
+                             (|new_v| (c::declar
+                                       (c::uint-from-sint |is0|)))
+                             (|st| (struct-|wst|-write-|op|-element
+                                    |idx| |new_v| |st|))
+                             (|pc| (c::assign
+                                    (c::add-sint-sint
+                                     |pc| (c::sint-dec-const 1))))
+                             (|halted| (c::assign
+                                        (c::condexpr
+                                         (if (c::boolean-from-sint |ok|)
+                                             |halted|
+                                           (c::sint-dec-const 1))))))
+                        (|exec_straight_line| |st| |sp| |pc| |end_pc| |halted|
+                                        |wasm_buf|))
+
+                    (if (c::boolean-from-sint
+                         (c::eq-sint-sint |b| (c::sint-dec-const #x70)))
+                        (let* ((|ok| (c::declar
+                                      (c::gt-sint-sint
+                                       |sp| (c::sint-dec-const 1))))
+                               (|bi| (c::declar
+                                      (c::condexpr
+                                       (if (c::boolean-from-sint |ok|)
+                                           (c::sub-sint-sint
+                                            |sp| (c::sint-dec-const 1))
+                                         (c::sint-dec-const 0)))))
+                               (|ai| (c::declar
+                                      (c::condexpr
+                                       (if (c::boolean-from-sint |ok|)
+                                           (c::sub-sint-sint
+                                            |sp| (c::sint-dec-const 2))
+                                         (c::sint-dec-const 0)))))
+                               (|bv| (c::declar
+                                      (struct-|wst|-read-|op|-element
+                                       |bi| |st|)))
+                               (|av| (c::declar
+                                      (struct-|wst|-read-|op|-element
+                                       |ai| |st|)))
+                               (|nz| (c::declar
+                                      (c::sint-from-boolean
+                                       (or (c::boolean-from-sint
+                                            (c::ne-uint-uint
+                                             |bv| (c::uint-dec-const 0)))
+                                           (c::boolean-from-sint
+                                            (c::ne-uint-uint
+                                             |bv| (c::uint-dec-const 0)))))))
+                               (|safe| (c::declar
+                                        (c::sint-from-boolean
+                                         (and (c::boolean-from-sint |ok|)
+                                              (c::boolean-from-sint |nz|)))))
+                               (|bv_safe| (c::declar
+                                           (c::condexpr
+                                            (if (c::boolean-from-sint |safe|)
+                                                |bv|
+                                              (c::uint-dec-const 1)))))
+                               (|rv| (c::declar
+                                      (c::rem-uint-uint |av| |bv_safe|)))
+                               (|st| (struct-|wst|-write-|op|-element
+                                      |ai| |rv| |st|))
+                               (|sp| (c::assign
+                                      (c::condexpr
+                                       (if (c::boolean-from-sint |safe|)
+                                           (c::sub-sint-sint
+                                            |sp| (c::sint-dec-const 1))
+                                         |sp|))))
+                               (|pc| (c::assign
+                                      (c::add-sint-sint
+                                       |pc| (c::sint-dec-const 1))))
+                               (|halted| (c::assign
+                                          (c::condexpr
+                                           (if (c::boolean-from-sint |safe|)
+                                               |halted|
+                                             (c::sint-dec-const 1))))))
+                          (|exec_straight_line| |st| |sp| |pc| |end_pc| |halted|
+                                        |wasm_buf|))
+
+                      ;; Not a straight-line opcode: halt the inner loop.
+                      ;; (Phase 2b will widen the SL set / hand off cleanly
+                      ;; to the outer dispatcher; for now we just halt so
+                      ;; ATC sees every running-branch path recurse.)
+                      (let* ((|halted| (c::assign (c::sint-dec-const 1))))
+                        (|exec_straight_line| |st| |sp| |pc| |end_pc|
+                                              |halted| |wasm_buf|))))))))
+        (mv |st| |sp| |pc| |halted|))
+    (mv |st| |sp| |pc| |halted|)))
+
+(defrulel struct-wst-p-of-mv-nth-0-exec_straight_line
+  (implies (struct-|wst|-p |st|)
+           (struct-|wst|-p
+            (mv-nth 0 (|exec_straight_line| |st| |sp| |pc| |end_pc| |halted|
+                                            |wasm_buf|))))
+  :induct (|exec_straight_line| |st| |sp| |pc| |end_pc| |halted| |wasm_buf|)
+  :enable (|exec_straight_line|))
+
 (defun |invoke| (|st| |m| |a| |b| |wasm_buf|)
   (declare (xargs :guard (and (c::star (struct-|wst|-p |st|))
                               (c::star (struct-|wmod|-p |m|))
@@ -1975,6 +2308,77 @@
       (mv (struct-|wst|-read-|op|-element (c::sint-dec-const 0) |st|)
           |st|))))
 
+;; Phase 2 entry point.  For now |invoke_v2| just runs |exec_straight_line|
+;; once over the entire body (no block dispatch — that's Phase 2b).  This
+;; satisfies ATC's "called by another target" requirement and gives us a
+;; second C entry point we can compare against |invoke| once |exec_blocks|
+;; is in place.  On the 4 oracle fixtures it will halt early at the first
+;; control-flow byte, so Phase 2a output is intentionally unequal to Phase 1
+;; output — that's fine.
+(defun |invoke_v2| (|st| |m| |a| |b| |wasm_buf|)
+  (declare (xargs :guard (and (c::star (struct-|wst|-p |st|))
+                              (c::star (struct-|wmod|-p |m|))
+                              (c::uintp |a|)
+                              (c::uintp |b|)
+                              (object-|wasm_buf|-p |wasm_buf|))
+                  :guard-hints
+                  (("Goal" :in-theory (enable object-|wasm_buf|-p
+                                              c::declar c::assign
+                                              c::condexpr
+                                              c::add-sint-sint
+                                              c::add-sint-sint-okp
+                                              c::ge-sint-sint
+                                              c::le-sint-sint
+                                              c::boolean-from-sint
+                                              c::sint-from-boolean
+                                              c::sint-integerp-alt-def)))))
+  (let* ((|st| (struct-|wst|-write-|loc|-element
+                (c::sint-dec-const 0) |a| |st|))
+         (|st| (struct-|wst|-write-|loc|-element
+                (c::sint-dec-const 1) |b| |st|))
+         (|pc_raw| (c::declar (struct-|wmod|-read-|body_off| |m|)))
+         (|len_raw| (c::declar (struct-|wmod|-read-|body_len| |m|)))
+         (|pc| (c::declar
+                (c::condexpr
+                 (if (c::boolean-from-sint
+                      (c::sint-from-boolean
+                       (and (c::boolean-from-sint
+                             (c::ge-sint-sint
+                              |pc_raw| (c::sint-dec-const 0)))
+                            (c::boolean-from-sint
+                             (c::le-sint-sint
+                              |pc_raw| (c::sint-dec-const 60000))))))
+                     |pc_raw|
+                   (c::sint-dec-const 0)))))
+         (|len_safe| (c::declar
+                      (c::condexpr
+                       (if (c::boolean-from-sint
+                            (c::sint-from-boolean
+                             (and (c::boolean-from-sint
+                                   (c::ge-sint-sint
+                                    |len_raw| (c::sint-dec-const 0)))
+                                  (c::boolean-from-sint
+                                   (c::le-sint-sint
+                                    |len_raw| (c::sint-dec-const 60000))))))
+                           |len_raw|
+                         (c::sint-dec-const 0)))))
+         (|end_raw| (c::declar
+                     (c::add-sint-sint |pc| |len_safe|)))
+         (|end_pc| (c::declar
+                    (c::condexpr
+                     (if (c::boolean-from-sint
+                          (c::le-sint-sint
+                           |end_raw| (c::sint-dec-const 60000)))
+                         |end_raw|
+                       (c::sint-dec-const 60000)))))
+         (|sp|     (c::declar (c::sint-dec-const 0)))
+         (|halted| (c::declar (c::sint-dec-const 0))))
+    (mv-let (|st| |sp| |pc| |halted|)
+        (|exec_straight_line| |st| |sp| |pc| |end_pc| |halted| |wasm_buf|)
+      (declare (ignore |sp| |pc| |halted|))
+      (mv (struct-|wst|-read-|op|-element (c::sint-dec-const 0) |st|)
+          |st|))))
+
 (c::atc |wasm_buf|
         |wmod|
         |wst|
@@ -1990,7 +2394,9 @@
         |extract_cfg$loop|
         |extract_cfg|
         |exec$loop|
+        |exec_straight_line|
         |invoke|
+        |invoke_v2|
         :file-name "wasm-vm2"
         :header t
         :proofs nil)

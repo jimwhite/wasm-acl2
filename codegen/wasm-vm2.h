@@ -47,3 +47,5 @@ void apply_else(int pc, struct wcfg *w);
 void extract_cfg(struct wcfg *w, struct wmod *m);
 
 unsigned int invoke(struct wst *st, struct wmod *m, unsigned int a, unsigned int b);
+
+unsigned int invoke_v2(struct wst *st, struct wmod *m, unsigned int a, unsigned int b);

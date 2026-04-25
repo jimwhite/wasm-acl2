@@ -291,3 +291,83 @@ unsigned int invoke(struct wst *st, struct wmod *m, unsigned int a, unsigned int
     }
     return st->op[0];
 }
+
+unsigned int invoke_v2(struct wst *st, struct wmod *m, unsigned int a, unsigned int b) {
+    st->loc[0] = a;
+    st->loc[1] = b;
+    int pc_raw = m->body_off;
+    int len_raw = m->body_len;
+    int pc = pc_raw >= 0 && pc_raw <= 60000 ? pc_raw : 0;
+    int len_safe = len_raw >= 0 && len_raw <= 60000 ? len_raw : 0;
+    int end_raw = pc + len_safe;
+    int end_pc = end_raw <= 60000 ? end_raw : 60000;
+    int sp = 0;
+    int halted = 0;
+    while (halted == 0 && pc < end_pc && pc < 59998) {
+        int b = (int) wasm_buf[pc];
+        if (b == 32) {
+            int x = (int) wasm_buf[pc + 1];
+            int ok = sp < 64 && x < 16;
+            int x_safe = ok ? x : 0;
+            int sp_safe = ok ? sp : 0;
+            unsigned int v = st->loc[x_safe];
+            st->op[sp_safe] = v;
+            sp = ok ? sp + 1 : sp;
+            pc = pc + 2;
+            halted = ok ? halted : 1;
+        } else {
+            if (b == 33) {
+                int x = (int) wasm_buf[pc + 1];
+                int ok = sp > 0 && x < 16;
+                int x_safe = ok ? x : 0;
+                int idx = ok ? sp - 1 : 0;
+                unsigned int v = st->op[idx];
+                st->loc[x_safe] = v;
+                sp = ok ? sp - 1 : sp;
+                pc = pc + 2;
+                halted = ok ? halted : 1;
+            } else {
+                if (b == 34) {
+                    int x = (int) wasm_buf[pc + 1];
+                    int ok = sp > 0 && x < 16;
+                    int x_safe = ok ? x : 0;
+                    int idx = ok ? sp - 1 : 0;
+                    unsigned int v = st->op[idx];
+                    st->loc[x_safe] = v;
+                    pc = pc + 2;
+                    halted = ok ? halted : 1;
+                } else {
+                    if (b == 69) {
+                        int ok = sp > 0;
+                        int idx = ok ? sp - 1 : 0;
+                        unsigned int v = st->op[idx];
+                        int is0 = v == 0U || v == 0U;
+                        unsigned int new_v = (unsigned int) is0;
+                        st->op[idx] = new_v;
+                        pc = pc + 1;
+                        halted = ok ? halted : 1;
+                    } else {
+                        if (b == 112) {
+                            int ok = sp > 1;
+                            int bi = ok ? sp - 1 : 0;
+                            int ai = ok ? sp - 2 : 0;
+                            unsigned int bv = st->op[bi];
+                            unsigned int av = st->op[ai];
+                            int nz = bv != 0U || bv != 0U;
+                            int safe = ok && nz;
+                            unsigned int bv_safe = safe ? bv : 1U;
+                            unsigned int rv = av % bv_safe;
+                            st->op[ai] = rv;
+                            sp = safe ? sp - 1 : sp;
+                            pc = pc + 1;
+                            halted = safe ? halted : 1;
+                        } else {
+                            halted = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return st->op[0];
+}
