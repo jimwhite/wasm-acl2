@@ -38,6 +38,12 @@ struct wcfg {
 
 int scan_end(int pc);
 
+void apply_open(int pc, int b, struct wcfg *w);
+
+void apply_end(int pc, struct wcfg *w);
+
+void apply_else(int pc, struct wcfg *w);
+
 void extract_cfg(struct wcfg *w, struct wmod *m);
 
 unsigned int invoke(struct wst *st, struct wmod *m, unsigned int a, unsigned int b);

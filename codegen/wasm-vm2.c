@@ -69,6 +69,48 @@ int scan_end(int pc) {
     return pc;
 }
 
+void apply_open(int pc, int b, struct wcfg *w) {
+    int nbr_raw = w->nbr;
+    int pt_raw = w->pend_top;
+    int ok = nbr_raw >= 0 && nbr_raw < 64 && pt_raw >= 0 && pt_raw < 16;
+    if (ok) {
+        w->opener_pc[nbr_raw] = pc;
+        w->opener[nbr_raw] = (unsigned char) b;
+        w->pend[pt_raw] = nbr_raw;
+        w->nbr = nbr_raw + 1;
+        w->pend_top = pt_raw + 1;
+    } else {
+        w->err = (unsigned char) 1;
+    }
+}
+
+void apply_end(int pc, struct wcfg *w) {
+    int pt_raw = w->pend_top;
+    int ok = pt_raw > 0 && pt_raw <= 16;
+    if (ok) {
+        int top_idx = pt_raw - 1;
+        int peek_raw = w->pend[top_idx];
+        int peek = peek_raw >= 0 && peek_raw < 64 ? peek_raw : 0;
+        w->end_pc[peek] = pc + 1;
+        w->pend_top = top_idx;
+    } else {
+        w->pend_top = pt_raw;
+    }
+}
+
+void apply_else(int pc, struct wcfg *w) {
+    int pt_raw = w->pend_top;
+    int ok = pt_raw > 0 && pt_raw <= 16;
+    if (ok) {
+        int top_idx = pt_raw - 1;
+        int peek_raw = w->pend[top_idx];
+        int peek = peek_raw >= 0 && peek_raw < 64 ? peek_raw : 0;
+        w->else_pc[peek] = pc + 1;
+    } else {
+        w->err = (unsigned char) 1;
+    }
+}
+
 void extract_cfg(struct wcfg *w, struct wmod *m) {
     int body_off_raw = m->body_off;
     int body_len_raw = m->body_len;
@@ -79,14 +121,19 @@ void extract_cfg(struct wcfg *w, struct wmod *m) {
     while (pc < end_pc && pc < 59998) {
         int b = (int) wasm_buf[pc];
         int is_open = b == 2 || (b == 3 || b == 4);
-        int is_wide = is_open || (b == 5 || (b == 12 || (b == 13 || (b == 32 || (b == 33 || (b == 34 || b == 65))))));
-        int nbr_raw = w->nbr;
-        int room = is_open && nbr_raw >= 0 && nbr_raw < 64;
-        int slot = room ? nbr_raw : 0;
-        if (room) {
-            w->opener_pc[slot] = pc;
-            w->opener[slot] = (unsigned char) b;
-            w->nbr = nbr_raw + 1;
+        int is_end_op = b == 11;
+        int is_else_op = b == 5;
+        int is_wide = is_open || (is_else_op || (b == 12 || (b == 13 || (b == 32 || (b == 33 || (b == 34 || b == 65))))));
+        if (is_open) {
+            apply_open(pc, b, w);
+        } else {
+            if (is_end_op) {
+                apply_end(pc, w);
+            } else {
+                if (is_else_op) {
+                    apply_else(pc, w);
+                }
+            }
         }
         int step = is_wide ? 2 : 1;
         pc = pc + step;

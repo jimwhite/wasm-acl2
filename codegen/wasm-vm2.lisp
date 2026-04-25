@@ -365,26 +365,274 @@
         |m|))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; CFG extraction — Phase 1.0 (bracket counting only).
+;; CFG extraction — Phase 1.1 (full bracket matching).
 ;;
-;; Walks bytes [pc, end_pc) once, recording each block/loop/if opener at the
-;; next free wcfg slot.  Termination is structural: pc strictly advances by
-;; >=1 every iteration and is bounded above by end_pc, so the measure
-;; (nfix (end_pc - pc)) strictly decreases — NO FUEL ARGUMENT.
+;; Walks bytes [pc, end_pc) once, recording every block / loop / if opener
+;; and resolving each `end` and `else` against the matcher stack `|pend|`.
+;; Termination is structural: pc strictly advances by >=1 every iteration
+;; and is bounded above by end_pc, so the measure (nfix (end_pc - pc))
+;; strictly decreases — NO FUEL ARGUMENT.
 ;;
-;; Wide opcodes (2-byte) recognised: 0x02 0x03 0x04 0x05 0x0c 0x0d
-;; 0x20 0x21 0x22 0x41.  Anything else is treated as 1-byte.  This list
-;; matches scan$loop's is_wide list.  (Phase 1.1 will extend it as needed.)
+;; Per-step actions (mutually compatible — at most one ever fires):
+;;   opener (0x02/0x03/0x04): write opener_pc/opener[nbr] = pc/b,
+;;                            push nbr onto pend, nbr++, pend_top++.
+;;   end    (0x0b)           : let slot = pend[pend_top-1];
+;;                            write end_pc[slot] = pc+1; pend_top--.
+;;                            (No-op when pend_top=0 — every function body
+;;                             legally ends with a top-level end.)
+;;   else   (0x05)           : let slot = pend[pend_top-1];
+;;                            write else_pc[slot] = pc+1; pend stays.
 ;;
-;; Phase 1.1 will:
-;;   - record |end_pc|/|else_pc| via the |pend|/|pend_top| matcher stack
-;;   - signal |err|=1 on bracket overflow (>64)
-;;   - signal |err|=2 on pending-stack overflow (>16)
-;;   - signal |err|=3 if pend_top != 0 at termination (unbalanced)
+;; Wide opcodes (2-byte immediate) recognised: 0x02 0x03 0x04 0x05 0x0c
+;; 0x0d 0x20 0x21 0x22 0x41.  Anything else is treated as 1-byte.  This
+;; list matches scan$loop's is_wide list in vm1.
 ;;
-;; In Phase 1.0 we only populate |nbr|/|opener_pc|/|opener| and clamp at
-;; nbr=64 (silently dropping further openers — fine for the 4 oracle
-;; fixtures, all of which have <16 brackets).
+;; Error reporting (writes |err|=1):
+;;   - opener overflow: nbr already 64, or pend_top already 16.
+;;   - stray else at depth 0.
+;; A stray top-level end is *not* an error — required by spec.
+;;
+;; Bounds on |wcfg| fields after extract_cfg returns:
+;;   nbr      ∈ [0, 64]
+;;   pend_top ∈ [0, 16]   (should be 0 on a well-formed function body —
+;;                         the final 0x0b at top level is silently dropped)
+;;   end_pc[i], else_pc[i] ∈ [0, 60001]   (0 = unset for if without else)
+
+;; ---- Per-step action helpers ---------------------------------------------
+;; Each helper takes the running |w| and returns a new |w|.  Splitting these
+;; out keeps each guard / return-type proof small; the main loop's
+;; defrulel then only has to combine four leaf cases (open / end / else /
+;; no-op) rather than expand a 3-deep chain of conditional rebinds.
+
+(defun |apply_open| (|pc| |b| |w|)
+  ;; Opener (0x02/0x03/0x04): write opener_pc/opener[nbr], push nbr onto
+  ;; pend, bump nbr and pend_top.  Sets err=1 on overflow.
+  (declare (xargs
+    :guard (and (c::sintp |pc|)
+                (c::sintp |b|)
+                (c::star (struct-|wcfg|-p |w|))
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (<= 0 (c::integer-from-sint |b|))
+                (<= (c::integer-from-sint |b|) 255))
+    :guard-hints
+    (("Goal"
+      :in-theory
+      (enable c::add-sint-sint
+              c::add-sint-sint-okp
+              c::sint-integerp-alt-def
+              c::integer-from-cinteger-alt-def
+              c::ge-sint-sint
+              c::lt-sint-sint
+              c::declar
+              c::condexpr
+              |STRUCT-wcfg-opener_pc-INDEX-OKP|
+              |STRUCT-wcfg-opener-INDEX-OKP|
+              |STRUCT-wcfg-pend-INDEX-OKP|)))))
+  (let* ((|nbr_raw| (c::declar (struct-|wcfg|-read-|nbr| |w|)))
+         (|pt_raw|  (c::declar (struct-|wcfg|-read-|pend_top| |w|)))
+         (|ok|
+          (c::declar
+           (c::sint-from-boolean
+            (and (c::boolean-from-sint
+                  (c::ge-sint-sint |nbr_raw| (c::sint-dec-const 0)))
+                 (c::boolean-from-sint
+                  (c::lt-sint-sint |nbr_raw| (c::sint-dec-const 64)))
+                 (c::boolean-from-sint
+                  (c::ge-sint-sint |pt_raw| (c::sint-dec-const 0)))
+                 (c::boolean-from-sint
+                  (c::lt-sint-sint |pt_raw| (c::sint-dec-const 16))))))))
+    (if (c::boolean-from-sint |ok|)
+        (let* ((|w| (struct-|wcfg|-write-|opener_pc|-element
+                     |nbr_raw| |pc| |w|))
+               (|w| (struct-|wcfg|-write-|opener|-element
+                     |nbr_raw| (c::uchar-from-sint |b|) |w|))
+               (|w| (struct-|wcfg|-write-|pend|-element
+                     |pt_raw| |nbr_raw| |w|))
+               (|w| (struct-|wcfg|-write-|nbr|
+                     (c::add-sint-sint |nbr_raw| (c::sint-dec-const 1))
+                     |w|))
+               (|w| (struct-|wcfg|-write-|pend_top|
+                     (c::add-sint-sint |pt_raw| (c::sint-dec-const 1))
+                     |w|)))
+          |w|)
+      (let ((|w| (struct-|wcfg|-write-|err|
+                  (c::uchar-from-sint (c::sint-dec-const 1)) |w|)))
+        |w|))))
+
+(defrulel struct-wcfg-p-of-apply_open
+  (implies (and (c::sintp |pc|)
+                (c::sintp |b|)
+                (c::star (struct-|wcfg|-p |w|))
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000)
+                (<= 0 (c::integer-from-sint |b|))
+                (<= (c::integer-from-sint |b|) 255))
+           (c::star (struct-|wcfg|-p (|apply_open| |pc| |b| |w|))))
+  :enable (|apply_open|
+           c::add-sint-sint
+           c::ge-sint-sint
+           c::lt-sint-sint
+           c::declar
+           c::condexpr))
+
+(defun |apply_end| (|pc| |w|)
+  ;; End (0x0b): if pend stack non-empty, write end_pc[peek]=pc+1 and
+  ;; pop; otherwise silently no-op (top-level end is legal).
+  (declare (xargs
+    :guard (and (c::sintp |pc|)
+                (c::star (struct-|wcfg|-p |w|))
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000))
+    :guard-hints
+    (("Goal"
+      :in-theory
+      (enable c::add-sint-sint
+              c::add-sint-sint-okp
+              c::sub-sint-sint
+              c::sub-sint-sint-okp
+              c::sint-integerp-alt-def
+              c::integer-from-cinteger-alt-def
+              c::gt-sint-sint
+              c::le-sint-sint
+              c::ge-sint-sint
+              c::lt-sint-sint
+              c::declar
+              c::condexpr
+              |STRUCT-wcfg-pend-INDEX-OKP|
+              |STRUCT-wcfg-end_pc-INDEX-OKP|)))))
+  (let* ((|pt_raw| (c::declar (struct-|wcfg|-read-|pend_top| |w|)))
+         (|ok|
+          (c::declar
+           (c::sint-from-boolean
+            (and (c::boolean-from-sint
+                  (c::gt-sint-sint |pt_raw| (c::sint-dec-const 0)))
+                 (c::boolean-from-sint
+                  (c::le-sint-sint |pt_raw| (c::sint-dec-const 16))))))))
+    (if (c::boolean-from-sint |ok|)
+        (let* ((|top_idx|
+                (c::declar
+                 (c::sub-sint-sint |pt_raw| (c::sint-dec-const 1))))
+               (|peek_raw|
+                (c::declar
+                 (struct-|wcfg|-read-|pend|-element |top_idx| |w|)))
+               (|peek|
+                (c::declar
+                 (c::condexpr
+                  (if (c::boolean-from-sint
+                       (c::sint-from-boolean
+                        (and (c::boolean-from-sint
+                              (c::ge-sint-sint
+                               |peek_raw| (c::sint-dec-const 0)))
+                             (c::boolean-from-sint
+                              (c::lt-sint-sint
+                               |peek_raw| (c::sint-dec-const 64))))))
+                      |peek_raw|
+                    (c::sint-dec-const 0)))))
+               (|w| (struct-|wcfg|-write-|end_pc|-element
+                     |peek|
+                     (c::add-sint-sint |pc| (c::sint-dec-const 1))
+                     |w|))
+               (|w| (struct-|wcfg|-write-|pend_top| |top_idx| |w|)))
+          |w|)
+      (let ((|w| (struct-|wcfg|-write-|pend_top| |pt_raw| |w|)))
+        |w|))))
+
+(defrulel struct-wcfg-p-of-apply_end
+  (implies (and (c::sintp |pc|)
+                (c::star (struct-|wcfg|-p |w|))
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000))
+           (c::star (struct-|wcfg|-p (|apply_end| |pc| |w|))))
+  :enable (|apply_end|
+           c::add-sint-sint
+           c::sub-sint-sint
+           c::gt-sint-sint
+           c::le-sint-sint
+           c::ge-sint-sint
+           c::lt-sint-sint
+           c::declar
+           c::condexpr))
+
+(defun |apply_else| (|pc| |w|)
+  ;; Else (0x05): if pend stack non-empty, write else_pc[peek]=pc+1 and
+  ;; do NOT pop; otherwise stray else — set err=1.
+  (declare (xargs
+    :guard (and (c::sintp |pc|)
+                (c::star (struct-|wcfg|-p |w|))
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000))
+    :guard-hints
+    (("Goal"
+      :in-theory
+      (enable c::add-sint-sint
+              c::add-sint-sint-okp
+              c::sub-sint-sint
+              c::sub-sint-sint-okp
+              c::sint-integerp-alt-def
+              c::integer-from-cinteger-alt-def
+              c::gt-sint-sint
+              c::le-sint-sint
+              c::ge-sint-sint
+              c::lt-sint-sint
+              c::declar
+              c::condexpr
+              |STRUCT-wcfg-pend-INDEX-OKP|
+              |STRUCT-wcfg-else_pc-INDEX-OKP|)))))
+  (let* ((|pt_raw| (c::declar (struct-|wcfg|-read-|pend_top| |w|)))
+         (|ok|
+          (c::declar
+           (c::sint-from-boolean
+            (and (c::boolean-from-sint
+                  (c::gt-sint-sint |pt_raw| (c::sint-dec-const 0)))
+                 (c::boolean-from-sint
+                  (c::le-sint-sint |pt_raw| (c::sint-dec-const 16))))))))
+    (if (c::boolean-from-sint |ok|)
+        (let* ((|top_idx|
+                (c::declar
+                 (c::sub-sint-sint |pt_raw| (c::sint-dec-const 1))))
+               (|peek_raw|
+                (c::declar
+                 (struct-|wcfg|-read-|pend|-element |top_idx| |w|)))
+               (|peek|
+                (c::declar
+                 (c::condexpr
+                  (if (c::boolean-from-sint
+                       (c::sint-from-boolean
+                        (and (c::boolean-from-sint
+                              (c::ge-sint-sint
+                               |peek_raw| (c::sint-dec-const 0)))
+                             (c::boolean-from-sint
+                              (c::lt-sint-sint
+                               |peek_raw| (c::sint-dec-const 64))))))
+                      |peek_raw|
+                    (c::sint-dec-const 0))))))
+          (let ((|w| (struct-|wcfg|-write-|else_pc|-element
+                     |peek|
+                     (c::add-sint-sint |pc| (c::sint-dec-const 1))
+                     |w|)))
+            |w|))
+      (let ((|w| (struct-|wcfg|-write-|err|
+                  (c::uchar-from-sint (c::sint-dec-const 1)) |w|)))
+        |w|))))
+
+(defrulel struct-wcfg-p-of-apply_else
+  (implies (and (c::sintp |pc|)
+                (c::star (struct-|wcfg|-p |w|))
+                (<= 0 (c::integer-from-sint |pc|))
+                (<= (c::integer-from-sint |pc|) 60000))
+           (c::star (struct-|wcfg|-p (|apply_else| |pc| |w|))))
+  :enable (|apply_else|
+           c::add-sint-sint
+           c::sub-sint-sint
+           c::gt-sint-sint
+           c::le-sint-sint
+           c::ge-sint-sint
+           c::lt-sint-sint
+           c::declar
+           c::condexpr))
+
+;; ---- Main extraction loop ------------------------------------------------
 
 (defun |extract_cfg$loop| (|pc| |end_pc| |w| |wasm_buf|)
   (declare (xargs
@@ -457,12 +705,17 @@
                          (c::eq-sint-sint |b| (c::sint-dec-const #x03)))
                         (c::boolean-from-sint
                          (c::eq-sint-sint |b| (c::sint-dec-const #x04)))))))
+                 (|is_end_op|
+                  (c::declar
+                   (c::eq-sint-sint |b| (c::sint-dec-const #x0b))))
+                 (|is_else_op|
+                  (c::declar
+                   (c::eq-sint-sint |b| (c::sint-dec-const #x05))))
                  (|is_wide|
                   (c::declar
                    (c::sint-from-boolean
                     (or (c::boolean-from-sint |is_open|)
-                        (c::boolean-from-sint
-                         (c::eq-sint-sint |b| (c::sint-dec-const #x05)))
+                        (c::boolean-from-sint |is_else_op|)
                         (c::boolean-from-sint
                          (c::eq-sint-sint |b| (c::sint-dec-const #x0c)))
                         (c::boolean-from-sint
@@ -475,37 +728,17 @@
                          (c::eq-sint-sint |b| (c::sint-dec-const #x22)))
                         (c::boolean-from-sint
                          (c::eq-sint-sint |b| (c::sint-dec-const #x41)))))))
-                 (|nbr_raw| (c::declar (struct-|wcfg|-read-|nbr| |w|)))
-                 (|room|
-                  (c::declar
-                   (c::sint-from-boolean
-                    (and (c::boolean-from-sint |is_open|)
-                         (c::boolean-from-sint
-                          (c::ge-sint-sint
-                           |nbr_raw| (c::sint-dec-const 0)))
-                         (c::boolean-from-sint
-                          (c::lt-sint-sint
-                           |nbr_raw| (c::sint-dec-const 64)))))))
-                 (|slot|
-                  (c::declar
-                   (c::condexpr
-                    (if (c::boolean-from-sint |room|)
-                        |nbr_raw|
-                      (c::sint-dec-const 0)))))
+                 ;; Single-call dispatch — at most one helper fires per step
+                 ;; because is_open / is_end_op / is_else_op are mutually
+                 ;; exclusive (b can only equal one of those constants).
                  (|w|
-                  (if (c::boolean-from-sint |room|)
-                      (let* ((|w| (struct-|wcfg|-write-|opener_pc|-element
-                                   |slot| |pc| |w|))
-                             (|w| (struct-|wcfg|-write-|opener|-element
-                                   |slot|
-                                   (c::uchar-from-sint |b|)
-                                   |w|))
-                             (|w| (struct-|wcfg|-write-|nbr|
-                                   (c::add-sint-sint
-                                    |nbr_raw| (c::sint-dec-const 1))
-                                   |w|)))
-                        |w|)
-                    |w|))
+                  (if (c::boolean-from-sint |is_open|)
+                      (|apply_open| |pc| |b| |w|)
+                    (if (c::boolean-from-sint |is_end_op|)
+                        (|apply_end| |pc| |w|)
+                      (if (c::boolean-from-sint |is_else_op|)
+                          (|apply_else| |pc| |w|)
+                        |w|))))
                  (|step|
                   (c::declar
                    (c::condexpr
@@ -531,10 +764,7 @@
   :induct (|extract_cfg$loop| |pc| |end_pc| |w| |wasm_buf|)
   :enable (|extract_cfg$loop|
            c::add-sint-sint
-           c::sub-sint-sint
            c::lt-sint-sint
-           c::le-sint-sint
-           c::ge-sint-sint
            c::eq-sint-sint
            c::boolean-from-sint
            c::sint-from-boolean
@@ -1754,6 +1984,9 @@
         |wcfg|
         |scan$loop|
         |scan_end|
+        |apply_open|
+        |apply_end|
+        |apply_else|
         |extract_cfg$loop|
         |extract_cfg|
         |exec$loop|
