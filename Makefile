@@ -25,7 +25,7 @@ WAT_SOURCES := $(wildcard tests/oracle/*.wat)
 WASM_BINARIES := $(patsubst %.wat,%.wasm,$(WAT_SOURCES))
 
 .PHONY: all top proofs tests clean wasm wasm-vm1 oracle-verified-m1 \
-        codegen-demo codegen-run codegen-oracle codegen-vm2
+        codegen-demo codegen-run codegen-oracle codegen-vm2 codegen-dump-cfg
 
 # Single cert.pl invocation so its internal dependency tracker avoids races
 # on shared prerequisites like execution.cert.
@@ -114,6 +114,15 @@ codegen/wasm-vm2.cert codegen/wasm-vm2.c codegen/wasm-vm2.h: \
 
 codegen-vm2: codegen/wasm-vm2.cert
 
+codegen/dump_cfg: codegen/wasm-vm2.c codegen/wasm-vm2.h codegen/dump_cfg_main.c
+	$(CC) $(CFLAGS) -Icodegen codegen/wasm-vm2.c codegen/dump_cfg_main.c -o $@
+
+codegen-dump-cfg: codegen/dump_cfg $(WASM_BINARIES)
+	@for w in tests/oracle/gcd.wasm tests/oracle/factorial.wasm \
+	          tests/oracle/is_prime.wasm tests/oracle/collatz.wasm; do \
+	  echo "=== $$w ==="; ./codegen/dump_cfg $$w; \
+	done
+
 codegen/run_demo: codegen/run.c codegen/run.h codegen/run_main.c
 	$(CC) $(CFLAGS) -Icodegen codegen/run.c codegen/run_main.c -o $@
 
@@ -144,6 +153,7 @@ clean:
 	rm -f codegen/run_demo codegen/run.c codegen/run.h \
 	      codegen/wasm-vm1.c codegen/wasm-vm1.h \
 	      codegen/wasm-vm2.c codegen/wasm-vm2.h \
+	      codegen/dump_cfg \
 	      codegen/demo.c codegen/demo.h \
 	      codegen/loop-demo.c codegen/loop-demo.h \
 	      codegen/run_sanity
