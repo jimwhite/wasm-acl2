@@ -2,13 +2,12 @@
     "name": "WASAM ACL2",
     "image": "ghcr.io/jimwhite/acl2-jupyter:latest",
     "remoteUser": "jovyan",
-    "workspaceFolder": "/home/jovyan/work",
     // Start JupyterLab with `jupyter lab` to include auth or `jupyter lab --IdentityProvider.token=''` to skip that.
     "forwardPorts": [
-        8888
+        8877
     ],
     "portsAttributes": {
-        "8888": {
+        "8877": {
             "label": "JupyterLab",
             "protocol": "http",
             "onAutoForward": "openBrowserOnce",
@@ -16,7 +15,7 @@
         }
     },
     "containerEnv": {
-        "JUPYTER_PORT": "8888",
+        "JUPYTER_PORT": "8877",
         "RESTARTABLE": "yes",
         "USER": "jovyan",
 
