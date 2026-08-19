@@ -6,5 +6,8 @@
 		{
 			"path": "../../home/acl2"
 		}
-	]
+	],
+	"settings": {
+		"makefile.configureOnOpen": true
+	}
 }

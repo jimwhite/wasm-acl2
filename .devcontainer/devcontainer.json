@@ -23,5 +23,8 @@
         "ACL2": "/opt/acl2/bin/acl2",
         "ACL2_HOME": "/home/acl2",
         "ACL2_SYSTEM_BOOKS": "/home/acl2/books"
-    }
+    },
+    // Install the ACL2-assist tools (ACL2 MCP server + parinfer-rust CLI)
+    // on first container start. Idempotent; safe to re-run.
+    "postCreateCommand": "bash .devcontainer/install-tools.sh"
 }

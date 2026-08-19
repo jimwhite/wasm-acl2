@@ -1,0 +1,11 @@
+{
+    "servers": {
+        "acl2": {
+            "type": "stdio",
+            "command": "${userHome}/.venvs/acl2-mcp/bin/acl2-mcp",
+            "env": {
+                "ACL2": "/opt/acl2/bin/acl2"
+            }
+        }
+    }
+}
